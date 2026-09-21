@@ -12,12 +12,15 @@ crossbeam-channel = "0.5"
 crc32fast = "1"
 csv = "1"
 flate2 = "1"
+ggcat-api = { git = "https://github.com/algbio/ggcat", rev = "30045581666e001d9071886674e88e52e55769ac", default-features = false, features = ["hash-16bit", "hash-32bit", "hash-64bit", "hash-128bit"] }
 helicase = "=0.2.0"
 rayon = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 sshash-lib = "=0.7.1"
+# GGCAT 2.1 uses the buffered decoder API removed in 0.2.4.
+streaming-libdeflate-rs = "=0.2.3"
 tempfile = "3"
 xz2 = { package = "liblzma", version = "0.3" }
 zstd = "0.13"

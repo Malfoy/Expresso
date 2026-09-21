@@ -6,8 +6,7 @@ use std::{
     process::{Command, Output},
 };
 
-// Avoid concurrent GGCAT invocations in these fixtures: upstream can stall
-// during simultaneous tiny graph builds on some systems.
+// Serialize graph-building fixtures to bound their combined memory use.
 static GGCAT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn invoke(args: &[&str], cwd: &Path) -> Output {
@@ -17,7 +16,8 @@ fn invoke(args: &[&str], cwd: &Path) -> Output {
     if matches!(args.first(), Some(&"quantify" | &"run")) && !args.contains(&"--format") {
         command.args(["--format", "csv"]);
     }
-    command.current_dir(cwd).output().unwrap()
+    // Index construction must work without a separately installed GGCAT.
+    command.env("PATH", "").current_dir(cwd).output().unwrap()
 }
 fn success(args: &[&str], cwd: &Path) {
     let out = invoke(args, cwd);
@@ -113,13 +113,6 @@ fn values(path: &Path, kind: &str) -> Vec<u64> {
 #[test]
 fn long_kmers_and_all_shared_exons() {
     let _guard = GGCAT_TEST_LOCK.lock().unwrap();
-    if Command::new("ggcat")
-        .args(["build", "--help"])
-        .output()
-        .is_err()
-    {
-        return;
-    }
     let temp = tempfile::tempdir().unwrap();
     let dir = temp.path();
     let mut seed = 918_273u64;
@@ -222,16 +215,8 @@ fn long_kmers_and_all_shared_exons() {
 }
 
 #[test]
-fn real_ggcat_sshash_against_independent_oracle() {
+fn bundled_ggcat_sshash_against_independent_oracle() {
     let _guard = GGCAT_TEST_LOCK.lock().unwrap();
-    if Command::new("ggcat")
-        .args(["build", "--help"])
-        .output()
-        .is_err()
-    {
-        eprintln!("Skipping real GGCAT integration test: install ggcat and rerun cargo test");
-        return;
-    }
     let temp = tempfile::tempdir().unwrap();
     let dir = temp.path();
     let exons = vec![
@@ -376,6 +361,7 @@ fn real_ggcat_sshash_against_independent_oracle() {
     let weighted_expected = oracle(&exons, &weighted, 7);
     // The default format is compact; the small fixture fits in 8 bits exactly.
     let compact = Command::new(env!("CARGO_BIN_EXE_expresso"))
+        .env("PATH", "")
         .args([
             "quantify",
             "-i",

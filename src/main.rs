@@ -59,9 +59,6 @@ pub struct BuildArgs {
     minimizer: Option<usize>,
     #[arg(short = 't', long, default_value_t = default_threads())]
     threads: usize,
-    /// GGCAT executable path/name.
-    #[arg(long, default_value = "ggcat")]
-    ggcat: PathBuf,
     /// GGCAT memory hint and SSHash external-sort budget, in GiB (not a hard RSS cap).
     #[arg(long, default_value_t = 4)]
     memory_gb: usize,

@@ -1,5 +1,6 @@
 use crate::{BuildArgs, input};
 use anyhow::{Context, Result, ensure};
+use ggcat_api::{ExtraElaboration, GGCATConfig, GGCATInstance, GeneralSequenceBlockData};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use sshash_lib::{BuildConfiguration, Dictionary, DictionaryBuilder, Kmer, KmerBits};
@@ -7,7 +8,6 @@ use std::{
     fs::{self, File},
     io::{BufReader, BufWriter, Read, Write},
     path::Path,
-    process::Command,
     sync::atomic::{AtomicU16, AtomicU32, Ordering},
 };
 
@@ -273,27 +273,33 @@ pub fn build(args: &BuildArgs) -> Result<()> {
         args.k
     );
     let simplitigs = stage.path().join("simplitigs.fa");
-    let status = Command::new(&args.ggcat)
-        .arg("build")
-        .args([
-            "--simplitigs",
-            "-s",
-            "1",
-            "-k",
-            &args.k.to_string(),
-            "-j",
-            &args.threads.to_string(),
-            "-m",
-            &args.memory_gb.to_string(),
-        ])
-        .arg("-t")
-        .arg(scratch.path().join("ggcat"))
-        .arg("-o")
-        .arg(&simplitigs)
-        .arg(&normalized)
-        .status()
-        .with_context(|| format!("starting GGCAT: {}", args.ggcat.display()))?;
-    ensure!(status.success(), "GGCAT failed: {status}");
+    // Link GGCAT into EXPRESSO so building an index needs no external executable.
+    // Input has already been decompressed, parsed, and normalized by Helicase.
+    let ggcat = GGCATInstance::create(GGCATConfig {
+        temp_dir: Some(scratch.path().join("ggcat")),
+        memory: args.memory_gb as f64,
+        prefer_memory: false,
+        total_threads_count: args.threads,
+        intermediate_compression_level: None,
+        stats_file: None,
+        messages_callback: Some(|_, message| eprintln!("GGCAT: {message}")),
+    })
+    .context("initializing bundled GGCAT")?;
+    ggcat
+        .build_graph(
+            vec![GeneralSequenceBlockData::FASTA((normalized.clone(), None))],
+            simplitigs.clone(),
+            None,
+            args.k,
+            args.threads,
+            false,
+            None,
+            false,
+            1,
+            ExtraElaboration::FastSimplitigs,
+            None,
+        )
+        .context("building GGCAT simplitigs")?;
     let mut sequences = Vec::new();
     input::records(&simplitigs, |_, seq| {
         ensure!(

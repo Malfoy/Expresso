@@ -9,3 +9,8 @@ __pycache__/
 /results/
 /run-*/
 /benchmarks/local-synthetic.json
+/benchmarks/
+/scripts/
+/docs/
+/tests/test_gencode_features.py
+/examples/zstd_levels.rs
