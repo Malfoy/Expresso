@@ -1,0 +1,11 @@
+/target/
+/bench_runs/
+__pycache__/
+*.pyc
+/example-index/
+/example-results/
+/example-csv/
+/exon-index/
+/results/
+/run-*/
+/benchmarks/local-synthetic.json

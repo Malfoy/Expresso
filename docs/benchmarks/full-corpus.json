@@ -1,0 +1,42 @@
+{
+  "state": "finished_with_errors",
+  "started_utc": "2026-09-19T00:11:08.224749+00:00",
+  "finished_utc": "2026-09-21T09:41:50.495998+00:00",
+  "planned_datasets": 822141,
+  "planned_compressed_bytes": 75518483329066,
+  "completed_datasets": 822115,
+  "completed_compressed_bytes": 75517783087166,
+  "failed_datasets": 26,
+  "failed_compressed_bytes": 700241900,
+  "elapsed_seconds": 207042.27137960307,
+  "user_seconds": 10981679.971688,
+  "system_seconds": 50858.221569,
+  "max_rss_kib": 10088764,
+  "results_published": true,
+  "complete_coverage": false,
+  "exit_code": 0,
+  "reference": "GENCODE v49 whole transcripts",
+  "targets": 533740,
+  "k": 31,
+  "threads": 64,
+  "jobs": 16,
+  "bits": 8,
+  "compression": "zstd",
+  "zstd_level": 3,
+  "stats": false,
+  "keep_going": true,
+  "hardware": {
+    "cpu": "2 x Intel Xeon Gold 6430",
+    "exposed_cores": 64,
+    "ram_GiB_approx": 503
+  },
+  "output": {
+    "dataset_vectors": 822115,
+    "dataset_bytes": 81398687000,
+    "global_bytes": 360626,
+    "reference_bytes": 12246313,
+    "manifest_bytes": 734754031,
+    "bundle_bytes": 82146047970
+  },
+  "output_size_measurement_utc_date": "2026-09-21"
+}
