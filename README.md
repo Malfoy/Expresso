@@ -9,8 +9,6 @@ store one compact abundance vector per dataset plus a global sum.
 EXPRESSO combines [**GGCAT simplitigs**](https://github.com/algbio/ggcat),
 the [**Rust SSHash dictionary**](https://github.com/COMBINE-lab/sshash-rs), and
 [**Helicase FASTA/FASTQ parsing**](https://github.com/imartayan/helicase).
-Reference and query files can be uncompressed,
-gzip, xz, or Zstandard. K-mers shared by multiple reference records are excluded.
 
 ## How it works
 
@@ -141,13 +139,17 @@ sample_C	unitigs/sample_C.fa.zstd	unitigs
 The mode column is optional. Names must be unique and contain only ASCII
 letters, digits, `_`, `-`, or `.`; `.` and `..` alone are not valid names.
 
+## Implementation details
+
 ### Compression and record formats
+
+Reference and query files can be uncompressed, gzip, xz, or Zstandard.
 
 FASTA and conventional four-line FASTQ are supported. Compression is detected
 from file contents, including concatenated gzip/xz/zstd streams. Files do not
 need a particular extension for `quantify`; `.zst` and `.zstd` both work.
 
-## Counting semantics
+### Counting semantics
 
 | Setting or rule | Behavior |
 | --- | --- |
