@@ -231,11 +231,25 @@ pub fn build(args: &BuildArgs) -> Result<()> {
             .prefix("scratch-")
             .tempdir_in(stage.path())?
     };
+    let generated = stage.path().join("reference-exons.fa");
+    let reference = if let Some(gtf) = &args.gtf {
+        crate::exons::extract(
+            gtf,
+            &args.genome,
+            &generated,
+            crate::output::Compression::None,
+        )?;
+        &generated
+    } else {
+        args.exons
+            .as_ref()
+            .context("provide --exons or --gtf with --genome")?
+    };
     let normalized = scratch.path().join("exons.fa");
     let mut out = BufWriter::new(File::create(&normalized)?);
     let mut exons = Vec::new();
     let mut runs = 0usize;
-    input::records(&args.exons, |header, seq| {
+    input::records(reference, |header, seq| {
         let name = std::str::from_utf8(header)?
             .split_ascii_whitespace()
             .next()

@@ -92,6 +92,47 @@ relocates index-construction scratch files.
 
 ## Inputs
 
+### Generate exons from a GTF and genome
+
+Extract a FASTA with one header and one unwrapped sequence line per exon:
+
+```bash
+expresso extract-exons \
+  --gtf annotation.gtf.gz --genome genome.fa.gz --output exons.fa
+```
+
+GTF and genome inputs can be plain, gzip, xz, or zstd; compression is detected
+from their contents. Repeat `--genome` for multiple FASTA files (for example,
+one per chromosome); `--reference` is an alias. Output is plain FASTA by default.
+For compressed output, specify both the codec and the matching filename, such
+as `--output exons.fa.zst --compression zstd`.
+
+You can also build directly from these inputs, without a separate extraction:
+
+```bash
+expresso build \
+  --gtf annotation.gtf.gz --genome genome.fa.gz \
+  --index exon-index --k 31 --threads 16
+```
+
+`run` accepts the same `--gtf` and `--genome` options in place of `--exons`.
+The generated FASTA is retained as `reference-exons.fa` inside the index.
+
+Only GTF `exon` features are extracted. Coordinates are 1-based and inclusive;
+negative-strand exons are reverse-complemented, including IUPAC ambiguity codes.
+Repeated `(contig, start, end, strand)` intervals are merged across transcripts,
+while identical sequences at different loci remain separate targets. Available
+`exon_id` and `gene_id` attributes are retained in FASTA header descriptions.
+Headers use generated IDs and genomic coordinates; special characters in names
+are percent-escaped. Output follows genome contig order, then coordinate/strand
+order within each contig, independently of GTF line order.
+
+Use the matching **genomic** reference, with exactly the same contig names as
+the GTF. Missing or duplicate contigs, invalid coordinates, and invalid exon DNA
+are errors. Extraction streams genome records through Helicase and retains the
+annotation plus the current contig in memory. Output files must be new and are
+published only after successful extraction.
+
 ### Reference FASTA
 
 Each FASTA **record** is one target: a header followed by its sequence.

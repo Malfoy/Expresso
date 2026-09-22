@@ -1,5 +1,6 @@
 mod abundance;
 mod compact;
+mod exons;
 mod export;
 mod index;
 mod input;
@@ -23,6 +24,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Extract strand-oriented exon FASTA from a GTF and reference genome FASTAs.
+    #[command(visible_alias = "exons")]
+    ExtractExons(ExtractExonsArgs),
     /// Build reusable GGCAT simplitigs, Rust SSHash, and exon ownership tables.
     Build(BuildArgs),
     /// Count a file-of-files against a previously built index.
@@ -46,8 +50,14 @@ enum Command {
 #[derive(Args)]
 pub struct BuildArgs {
     /// FASTA: one exon per record (wrapped sequences are accepted).
-    #[arg(short, long)]
-    exons: PathBuf,
+    #[arg(short, long, required_unless_present = "gtf", conflicts_with_all = ["gtf", "genome"])]
+    exons: Option<PathBuf>,
+    /// Generate exons from this GTF instead of supplying --exons.
+    #[arg(long, requires = "genome")]
+    gtf: Option<PathBuf>,
+    /// Reference genome FASTA; repeat for multiple files. Used with --gtf.
+    #[arg(long, visible_alias = "reference", requires = "gtf")]
+    genome: Vec<PathBuf>,
     /// New index directory. Existing paths are never overwritten.
     #[arg(short, long)]
     index: PathBuf,
@@ -138,6 +148,22 @@ pub struct ExportArgs {
     threads: usize,
 }
 
+#[derive(Args)]
+pub struct ExtractExonsArgs {
+    /// GTF annotation containing exon features (plain, gzip, xz, or zstd).
+    #[arg(long)]
+    gtf: PathBuf,
+    /// Reference genome FASTA; repeat for multiple files.
+    #[arg(long, visible_alias = "reference", required = true)]
+    genome: Vec<PathBuf>,
+    /// New output FASTA file, with one unwrapped sequence line per exon.
+    #[arg(short, long)]
+    output: PathBuf,
+    /// Output compression; explicitly choose a matching filename suffix.
+    #[arg(long, value_enum, default_value_t = output::Compression::None)]
+    compression: output::Compression,
+}
+
 fn default_threads() -> usize {
     std::thread::available_parallelism().map_or(1, usize::from)
 }
@@ -145,6 +171,9 @@ fn default_threads() -> usize {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
+        Command::ExtractExons(args) => {
+            exons::extract(&args.gtf, &args.genome, &args.output, args.compression)
+        }
         Command::Build(args) => index::build(&args),
         Command::Quantify(args) => quantify::run(&args.index, args.threads, &args.query),
         Command::Export(args) => export::run(&args),
