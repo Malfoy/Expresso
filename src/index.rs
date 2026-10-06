@@ -31,6 +31,8 @@ pub struct Metadata {
     pub owner_bits: u8,
     pub indexed_kmers: usize,
     pub duplicate_kmers: usize,
+    #[serde(default)]
+    pub level: crate::Level,
     pub exons: Vec<Exon>,
 }
 
@@ -46,7 +48,7 @@ impl Metadata {
             (3..=63).contains(&meta.k) && meta.k % 2 == 1,
             "invalid index k"
         );
-        ensure!(!meta.exons.is_empty(), "index contains no exons");
+        ensure!(!meta.exons.is_empty(), "index contains no targets");
         Ok(meta)
     }
 }
@@ -129,7 +131,7 @@ impl Owners {
         for i in 0..meta.indexed_kmers {
             ensure!(
                 owners.exon(i).is_none_or(|e| e < meta.exons.len()),
-                "invalid exon ID in owner table"
+                "invalid target ID in owner table"
             );
         }
         Ok(owners)
@@ -142,7 +144,7 @@ enum AtomicOwners {
 }
 impl AtomicOwners {
     fn new(kmers: usize, exons: usize) -> Result<Self> {
-        ensure!(exons < u32::MAX as usize, "too many exons for 32-bit IDs");
+        ensure!(exons < u32::MAX as usize, "too many targets for 32-bit IDs");
         Ok(if exons < u16::MAX as usize {
             Self::U16((0..kmers).map(|_| AtomicU16::new(0)).collect())
         } else {
@@ -231,13 +233,18 @@ pub fn build(args: &BuildArgs) -> Result<()> {
             .prefix("scratch-")
             .tempdir_in(stage.path())?
     };
-    let generated = stage.path().join("reference-exons.fa");
+    let generated = stage.path().join(if args.level == crate::Level::Gene {
+        "reference-genes.fa"
+    } else {
+        "reference-exons.fa"
+    });
     let reference = if let Some(gtf) = &args.gtf {
-        crate::exons::extract(
+        crate::exons::extract_level(
             gtf,
             &args.genome,
             &generated,
             crate::output::Compression::None,
+            args.level,
         )?;
         &generated
     } else {
@@ -247,20 +254,31 @@ pub fn build(args: &BuildArgs) -> Result<()> {
     };
     let normalized = scratch.path().join("exons.fa");
     let mut out = BufWriter::new(File::create(&normalized)?);
-    let mut exons = Vec::new();
+    let mut exons: Vec<Exon> = Vec::new();
+    let mut gene_ids = std::collections::HashMap::new();
     let mut runs = 0usize;
     input::records(reference, |header, seq| {
         let name = std::str::from_utf8(header)?
             .split_ascii_whitespace()
             .next()
-            .context("empty exon header")?
+            .context("empty reference header")?
             .to_string();
-        let id = exons.len() + 1;
-        exons.push(Exon {
-            name,
-            length: seq.len(),
-            unique_kmers: 0,
-        });
+        let id = if args.level == crate::Level::Gene {
+            *gene_ids.entry(name.clone()).or_insert(exons.len() + 1)
+        } else {
+            exons.len() + 1
+        };
+        if id > exons.len() {
+            exons.push(Exon {
+                name,
+                length: 0,
+                unique_kmers: 0,
+            });
+        }
+        exons[id - 1].length = exons[id - 1]
+            .length
+            .checked_add(seq.len())
+            .context("target length overflow")?;
         // Explicit splitting ensures GGCAT cannot bridge an ambiguous base.
         for run in seq
             .split(|b| !input::is_dna(*b))
@@ -275,14 +293,14 @@ pub fn build(args: &BuildArgs) -> Result<()> {
     })?;
     out.flush()?;
     drop(out);
-    ensure!(!exons.is_empty(), "reference contains no exon records");
+    ensure!(!exons.is_empty(), "reference contains no target records");
     ensure!(runs > 0, "reference contains no valid {}-mers", args.k);
     ensure!(
         exons.len() < u32::MAX as usize,
-        "too many exons for 32-bit IDs"
+        "too many targets for 32-bit IDs"
     );
     eprintln!(
-        "Building simplitigs for {} exons (k={})",
+        "Building simplitigs for {} targets (k={})",
         exons.len(),
         args.k
     );
@@ -369,6 +387,7 @@ pub fn build(args: &BuildArgs) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("saving SSHash: {e}"))?;
     owners.write(&stage.path().join("owners.bin"))?;
     let meta = Metadata {
+        level: args.level,
         format_version: FORMAT_VERSION,
         expresso_version: env!("CARGO_PKG_VERSION").to_string(),
         sshash_version: "0.7.1".into(),
@@ -385,7 +404,7 @@ pub fn build(args: &BuildArgs) -> Result<()> {
     drop(scratch);
     publish(stage, &args.index)?;
     eprintln!(
-        "Index saved: {} ({bits}-bit exon IDs, {duplicate} shared k-mers excluded)",
+        "Index saved: {} ({bits}-bit target IDs, {duplicate} shared k-mers excluded)",
         args.index.display()
     );
     Ok(())

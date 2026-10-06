@@ -1,4 +1,5 @@
 /target/
+/viewer/wasm/target/
 /bench_runs/
 __pycache__/
 *.pyc

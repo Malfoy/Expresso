@@ -154,6 +154,10 @@ where
 
 pub fn run(index_dir: &Path, threads: usize, options: &QueryOptions) -> Result<()> {
     ensure!(
+        !options.viewer_index || options.format == output::Format::Compact,
+        "--viewer-index requires --format compact"
+    );
+    ensure!(
         threads > 0 && options.jobs > 0 && options.batch_bases > 0,
         "threads, jobs and batch-bases must be positive"
     );
@@ -320,6 +324,7 @@ pub fn run(index_dir: &Path, threads: usize, options: &QueryOptions) -> Result<(
     }
     let global_entry;
     let (reference_file, reference_compression);
+    let labels = meta.level.columns();
     if options.format == output::Format::Compact {
         let filename = format!("global{}", options.compression.vector_suffix());
         let info = compact::write_vector(
@@ -352,15 +357,15 @@ pub fn run(index_dir: &Path, threads: usize, options: &QueryOptions) -> Result<(
         }
         global_entry =
             serde_json::json!({"output":filename,"quantization":info,"statistics":columns});
-        reference_file = "exons.csv.zst";
+        reference_file = format!("{}.zst", meta.level.table());
         reference_compression = output::Compression::Zstd;
     } else {
         let filename = format!("global{}", options.compression.suffix());
         output::csv(&stage.path().join(&filename), options.compression, |csv| {
             if let Some(statistics) = &statistics {
                 csv.write_record([
-                    "exon_id",
-                    "exon_name",
+                    labels[0],
+                    labels[1],
                     "abundance",
                     "mean",
                     "median",
@@ -381,7 +386,11 @@ pub fn run(index_dir: &Path, threads: usize, options: &QueryOptions) -> Result<(
                     ))?;
                 }
             } else {
-                csv.write_record(["exon_id", "exon_name", "abundance"])?;
+                csv.write_record([
+                    meta.level.columns()[0],
+                    meta.level.columns()[1],
+                    "abundance",
+                ])?;
                 for (id, (exon, value)) in meta.exons.iter().zip(&total).enumerate() {
                     csv.serialize((id + 1, &exon.name, value))?;
                 }
@@ -389,14 +398,14 @@ pub fn run(index_dir: &Path, threads: usize, options: &QueryOptions) -> Result<(
             Ok(())
         })?;
         global_entry = serde_json::json!({"output":filename});
-        reference_file = "exons.csv";
+        reference_file = meta.level.table().to_string();
         reference_compression = output::Compression::None;
     }
     output::csv(
-        &stage.path().join(reference_file),
+        &stage.path().join(&reference_file),
         reference_compression,
         |csv| {
-            csv.write_record(["exon_id", "exon_name", "length", "unique_kmers"])?;
+            csv.write_record([labels[0], labels[1], "length", "unique_kmers"])?;
             for (i, e) in meta.exons.iter().enumerate() {
                 csv.serialize((i + 1, &e.name, e.length, e.unique_kmers))?;
             }
@@ -411,6 +420,7 @@ pub fn run(index_dir: &Path, threads: usize, options: &QueryOptions) -> Result<(
         "unitig_k":options.unitig_k.unwrap_or(meta.k), "threads":threads, "jobs":jobs,
         "compression":options.compression, "batch_bases":options.batch_bases, "stats":options.stats,
             "format": options.format, "compact_format_version": if options.format == output::Format::Compact {Some(1)} else {None},
+            "level":meta.level,
             "reference":{"file":reference_file,"sha256":compact::hex(&output_context.reference),"targets":n},
             "global":global_entry,
             "coverage":{"requested_datasets":datasets.len(), "completed_datasets":manifest.len(),
@@ -427,6 +437,9 @@ pub fn run(index_dir: &Path, threads: usize, options: &QueryOptions) -> Result<(
     out.flush()?;
     drop(out);
     drop(scratch);
+    if options.viewer_index {
+        crate::portable::pack(stage.path(), &stage.path().join("abundance.eai"))?;
+    }
     index::publish(stage, &options.output)?;
     eprintln!("Results saved: {}", options.output.display());
     Ok(())
@@ -457,7 +470,11 @@ fn finish_dataset(
     } else {
         let filename = format!("{}{}", dataset.name, options.compression.suffix());
         output::csv(&dataset_dir.join(&filename), options.compression, |csv| {
-            csv.write_record(["exon_id", "exon_name", "abundance"])?;
+            csv.write_record([
+                meta.level.columns()[0],
+                meta.level.columns()[1],
+                "abundance",
+            ])?;
             for (id, (exon, value)) in meta.exons.iter().zip(&counts.values).enumerate() {
                 csv.serialize((id + 1, &exon.name, value))?;
             }

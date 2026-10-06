@@ -2,7 +2,7 @@
 
 **EXon-level RNA EXPRESsion quantificatiOn**
 
-A parallel Rust tool for counting exon-specific k-mer observations in reads or
+A parallel Rust tool for counting exon- or gene-specific k-mer observations in reads or
 abundance-annotated unitigs. Build an index once, quantify many datasets, and
 store one compact abundance vector per dataset plus a global sum.
 
@@ -152,7 +152,8 @@ separate targets. Short targets and targets without usable unique k-mers remain
 in every vector as zeros. A reference without any valid k-mers cannot be indexed.
 
 Transcripts or genes can also be reference records; they are then the units
-being quantified. Output metadata retains the names `exon_id` and `exon_name`.
+being quantified. Use `--level gene` for gene references; output columns become `gene_id` and
+`gene_name`. The default exon mode retains `exon_id` and `exon_name`.
 
 ### Dataset list
 
@@ -197,7 +198,7 @@ need a particular extension for `quantify`; `.zst` and `.zstd` both work.
 | k-mer length | Odd k from 3 to 63; default 31 |
 | Strand | A k-mer and its reverse complement are equivalent |
 | Ambiguity | Non-ACGT bases interrupt k-mers; flanking DNA is never joined |
-| Shared sequence | K-mers present in multiple target records contribute to none |
+| Shared sequence | K-mers assigned to multiple targets contribute to none; gene mode groups records by gene ID |
 | Repeated sequence | Repetitions within one target retain that target as owner |
 | `--mode reads` | Every matching occurrence contributes 1 |
 | `--mode unitigs` | Every matching occurrence contributes the header abundance |
@@ -225,6 +226,41 @@ ties up, **after summing**. Reads use exact `u64` counts. Unitig/auto mode uses
 `u64` millionths, allowing approximately 18.4 trillion weighted observations per
 target/dataset. Overflow is reported explicitly. The shared reference table
 includes the number of distinct usable k-mers for downstream normalization.
+
+## Gene quantification
+
+Build a gene index from the annotation and matching genomic reference:
+
+```bash
+expresso build --level gene \
+  --gtf annotation.gtf.gz --genome genome.fa.gz \
+  --index gene-index --k 31 --threads 16
+
+expresso quantify --index gene-index --fof datasets.tsv \
+  --output gene-results --threads 16 --jobs 4 --viewer-index
+```
+
+`run` accepts `--level gene` too. Exon quantification remains the default. The
+quantification level is saved in the index, so `quantify` reuses it automatically.
+
+Gene mode requires `gene_id` on annotated exons. Within each gene, overlapping
+exon intervals on the same contig and strand are merged. Separated intervals
+remain separate FASTA records: introns and artificial exon junctions are never
+introduced. All records bearing the same gene ID share one owner. A k-mer
+present in multiple exons of one gene remains usable, while one shared between
+different genes is excluded. This cannot be recovered by simply summing an
+existing exon index; build a gene index to obtain the correct ownership.
+
+The generated `reference-genes.fa` is retained in the index. Its first header
+token is the percent-escaped GTF gene ID; annotations do not substitute gene
+symbols. The reference table uses `gene_id,gene_name,length,unique_kmers`, with
+1-based numeric IDs and the annotation's gene ID as the name. Length sums the
+merged exonic intervals, and unique k-mers are counted once per gene.
+
+Alternatively supply FASTA with `--level gene --genes genes.fa`. Records with
+the same first header token are grouped into one gene; disconnected sequences
+must be separate records, rather than concatenated. Duplicate gene IDs are
+intentional in this mode. Length is the sum of supplied record lengths.
 
 ## Outputs and CSV export
 
@@ -291,12 +327,41 @@ expresso export --input results --output global-csv --global-only --with-names
 
 Without `--with-names`, dataset CSVs have a single `abundance` column and one
 integer per target. Global CSVs also include any requested statistics. With
-`--with-names`, `exon_id` and `exon_name` precede abundance. Export copies the
-shared reference table and records source coverage in its manifest.
+`--with-names`, target ID and name precede abundance (exon or gene columns). Export writes the selected
+reference rows and records source coverage in its manifest.
+
+Select targets, datasets, and an inclusive range of decoded counts:
+
+```bash
+expresso export --input results --output subset-csv \
+  --target-list selected-exons.txt --dataset-list selected-datasets.txt \
+  --min-value 10 --max-value 10000 --compression zstd
+
+# Names or explicit original 1-based IDs; flags can be repeated.
+expresso export --input gene-results --output selected-genes \
+  --gene ENSG00000123456.7 --target-id 42 --dataset sample_A
+```
+
+Lists contain one exact name per line; blank lines and `#` comments are ignored.
+Compressed lists are accepted. `--target` (aliases `--exon`, `--gene`) selects
+names, `--target-id` selects numeric IDs, and `--target-list` (alias `--exon-list`)
+selects names from a file. These target selections are combined as a union.
+Duplicate names select all matching targets; numeric IDs distinguish them.
+`--dataset-list` and repeated `--dataset` are combined likewise. Unknown names,
+out-of-range IDs, empty list files, and reversed bounds are errors.
+
+A target or value filter automatically adds ID/name columns and preserves
+original IDs and reference order. Bounds omit nonmatching rows **independently
+in each dataset CSV**; they do not clip counts or change the global sum. Bounds
+on global export apply to its abundance column. The accompanying reference
+table lists selected targets before the value filter; each CSV identifies its
+surviving rows. Dataset selection exports those datasets only; without it,
+all datasets plus the original global sum are exported. Use `--global-only`
+for just the global sum and available statistics.
 
 CSV export returns decoded representatives: it cannot restore values discarded
 by quantization. To retain exact original counts from the start, quantify with
-`--format csv`. This writes `exon_id,exon_name,abundance` in every dataset CSV
+`--format csv`. This writes target ID, name, and abundance in every dataset CSV
 and an exact global CSV; repeating names makes these files much larger.
 
 | `--compression` | Compact vectors | CSVs |
@@ -307,7 +372,73 @@ and an exact global CSV; repeating names makes these files much larger.
 | `none` | `.eab` | `.csv` |
 
 This option is independent of input compression. The shared compact reference
-is always `exons.csv.zst`; exact CSV output uses `exons.csv`.
+is `exons.csv.zst` or `genes.csv.zst`; exact CSV output uses the uncompressed table.
+
+### Portable abundance index and WebAssembly viewer
+
+```bash
+# Package a completed compact result directory, including its global sum.
+expresso pack --input results --output abundance.eai
+
+# Open the printed localhost URL, then choose abundance.eai in the browser.
+expresso view
+
+# The same portable file supports CLI extraction.
+expresso export --input abundance.eai --output selected-csv \
+  --target-list selected-exons.txt --dataset sample_A --compression none
+```
+
+`quantify` and `run` can also generate `results/abundance.eai` automatically
+with `--viewer-index` (compact output only). This keeps the standard result files
+and adds a portable copy.
+
+`pack` accepts compact results with any supported compression, including older
+EAB v1 exon results. It validates every vector and writes a new `.eai` file,
+using one independent zstd frame per vector. Encoded values are preserved
+without a second quantization. Global and optional statistic vectors are
+included. Packing reads the entire result set and requires disk space for the
+new file; original results remain reusable.
+
+The viewer is bundled into the Rust executable; Node, npm, a separate web
+server, and a WASM toolchain are unnecessary to use it. `view --port 9000`
+chooses another localhost port. It serves only the application assets. Selecting
+an index does **not** upload it. Target/dataset searches, pasted name or `#ID`
+lists, count bounds, logarithmic or linear coloring, and CSV download all run
+locally. The global sum and stored statistics are selectable alongside datasets.
+
+The browser reads the catalogue and only the selected dataset blocks from the
+local file. Rust/WebAssembly decompresses zstd and validates the shared EAB
+format, reference fingerprint, and checksum. Only selected counts return to the
+page; decimal strings and JavaScript `BigInt` preserve all 64-bit integer values.
+Heatmap colors use floating point, while displayed/exported counts remain
+integers. Cells outside the inclusive bounds are gray and export as empty CSV
+fields, preserving the distinction from zero. Browser CSV is a target-by-dataset
+matrix; CLI CSVs remain one file per dataset.
+
+Each view supports up to **200 targets × 100 datasets**. Search results show the
+first 150 matches; narrow the search or paste names/IDs to select others. The
+catalogue must fit in browser memory and is limited to 256 MiB; one full
+selected vector is decoded at a time. File bytes are read on demand, but this
+is not a guarantee that arbitrary corpus-scale metadata will fit every browser.
+Use CLI export for larger selections. Open through `expresso view`, rather than
+`file://`, so WebAssembly, workers, and the checksum API are available.
+
+The app's Rust source and a prebuilt WASM module are included. To rebuild it:
+
+```bash
+rustup target add wasm32-unknown-unknown
+env RUSTFLAGS= cargo build --manifest-path viewer/wasm/Cargo.toml \
+  --target wasm32-unknown-unknown --release --locked
+cp viewer/wasm/target/wasm32-unknown-unknown/release/expresso_viewer.wasm \
+  viewer/expresso_viewer.wasm
+cargo build --release --locked
+```
+
+Empty `RUSTFLAGS` overrides the native CPU setting for the WASM build. EAI v1
+starts with `EXPREAI1`, little-endian 64-bit catalogue offset and length, then
+independent zstd-compressed EAB blocks. A trailing JSON catalogue records target
+metadata, vector kind/name/offset/length, and coverage; a SHA-256 follows it.
+The same EAB validation code is compiled into the native tool and WASM decoder.
 
 ### Failed datasets
 
@@ -327,10 +458,12 @@ resume; completed vectors are staged until the overall run is published.
 cargo fmt --check
 cargo test --locked
 cargo clippy --all-targets --locked -- -D warnings
+env RUSTFLAGS= cargo test --manifest-path viewer/wasm/Cargo.toml --locked
 ```
 
 Rust tests cover the EAB codecs and bit widths, integer boundaries, integrity
-checks, shared-k-mer exclusion, weighted counting, global sums, and failures.
+checks, exon and gene ownership, weighted counting, filtered export, portable
+index round trips, global sums, and failures.
 Integration tests use the bundled GGCAT library with an empty `PATH` and compare
 counts with an independent canonical-k-mer oracle. No separate tools or Python
 scripts are needed to run the tests.

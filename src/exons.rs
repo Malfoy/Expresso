@@ -86,7 +86,7 @@ fn attributes(mut text: &str) -> Result<Names> {
     Ok(names)
 }
 
-fn annotation(path: &Path) -> Result<Annotation> {
+fn annotation(path: &Path, require_genes: bool) -> Result<Annotation> {
     let mut annotation: Annotation = BTreeMap::new();
     let mut reader = BufReader::new(output::reader(path)?);
     let mut line = String::new();
@@ -126,6 +126,10 @@ fn annotation(path: &Path) -> Result<Annotation> {
                 strand: fields[6].as_bytes()[0],
             };
             let names = attributes(fields[8])?;
+            ensure!(
+                !require_genes || !names.genes.is_empty(),
+                "gene quantification requires gene_id on every exon"
+            );
             let entry = annotation
                 .entry(contig.to_string())
                 .or_default()
@@ -210,6 +214,16 @@ pub fn extract(
     destination: &Path,
     compression: output::Compression,
 ) -> Result<()> {
+    extract_level(gtf, genomes, destination, compression, crate::Level::Exon)
+}
+
+pub fn extract_level(
+    gtf: &Path,
+    genomes: &[PathBuf],
+    destination: &Path,
+    compression: output::Compression,
+    level: crate::Level,
+) -> Result<()> {
     ensure!(
         !genomes.is_empty(),
         "provide at least one reference genome FASTA"
@@ -219,7 +233,41 @@ pub fn extract(
         "output already exists: {}",
         destination.display()
     );
-    let mut annotation = annotation(gtf)?;
+    let mut annotation = annotation(gtf, level == crate::Level::Gene)?;
+    if level == crate::Level::Gene {
+        // Group and merge overlapping exonic intervals, never separated exons.
+        for loci in annotation.values_mut() {
+            let mut genes: BTreeMap<(String, u8), Vec<Locus>> = BTreeMap::new();
+            for (locus, names) in loci.iter() {
+                ensure!(
+                    !names.genes.is_empty(),
+                    "gene quantification requires gene_id on every exon"
+                );
+                for gene in &names.genes {
+                    genes
+                        .entry((gene.clone(), locus.strand))
+                        .or_default()
+                        .push(*locus);
+                }
+            }
+            loci.clear();
+            for ((gene, _), intervals) in genes {
+                let mut merged: Vec<Locus> = Vec::new();
+                for locus in intervals {
+                    if let Some(last) = merged.last_mut()
+                        && locus.start <= last.end
+                    {
+                        last.end = last.end.max(locus.end);
+                    } else {
+                        merged.push(locus);
+                    }
+                }
+                for locus in merged {
+                    loci.entry(locus).or_default().genes.insert(gene.clone());
+                }
+            }
+        }
+    }
     let parent = destination
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -268,29 +316,37 @@ pub fn extract(
                         sequence.reverse();
                     }
                     count += 1;
-                    write!(
-                        out,
-                        ">exon_{count:06}|{}:{}-{}:{}",
-                        header_value(contig),
-                        locus.start,
-                        locus.end,
-                        locus.strand as char
-                    )?;
-                    for (label, ids) in [("exon_ids", names.exons), ("gene_ids", names.genes)] {
-                        if !ids.is_empty() {
-                            write!(
-                                out,
-                                " {label}={}",
-                                ids.iter()
-                                    .map(|id| header_value(id))
-                                    .collect::<Vec<_>>()
-                                    .join(",")
-                            )?;
+                    if level == crate::Level::Gene {
+                        for gene in &names.genes {
+                            writeln!(out, ">{}", header_value(gene))?;
+                            out.write_all(&sequence)?;
+                            writeln!(out)?;
                         }
+                    } else {
+                        write!(
+                            out,
+                            ">exon_{count:06}|{}:{}-{}:{}",
+                            header_value(contig),
+                            locus.start,
+                            locus.end,
+                            locus.strand as char
+                        )?;
+                        for (label, ids) in [("exon_ids", names.exons), ("gene_ids", names.genes)] {
+                            if !ids.is_empty() {
+                                write!(
+                                    out,
+                                    " {label}={}",
+                                    ids.iter()
+                                        .map(|id| header_value(id))
+                                        .collect::<Vec<_>>()
+                                        .join(",")
+                                )?;
+                            }
+                        }
+                        writeln!(out)?;
+                        out.write_all(&sequence)?;
+                        writeln!(out)?;
                     }
-                    writeln!(out)?;
-                    out.write_all(&sequence)?;
-                    writeln!(out)?;
                 }
                 Ok(())
             })?;

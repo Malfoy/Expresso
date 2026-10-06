@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>EXPRESSO · Abundance explorer</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header><a class="wordmark" href="./">EXPRESSO<span>ABUNDANCE EXPLORER</span></a><span class="local">● Local file · private by design</span></header>
+  <main>
+    <div class="intro"><p class="eyebrow">FROM SEQUENCE TO SIGNAL</p><h1>Your counts, in context.</h1><p>Explore exon or gene abundance across datasets. Select a few targets, compare their signals, and export the view.</p></div>
+    <section class="source card"><div><h2>Open your abundance index</h2><p>Choose the <code>.eai</code> file produced by <code>expresso pack</code>. Data stays in this browser.</p></div><label class="button">Choose index<input id="file" type="file" accept=".eai" hidden></label></section>
+    <p id="status" role="status" aria-live="polite">No index loaded. Open a file to begin.</p>
+    <div id="controls" hidden>
+      <div class="metrics"><div><span id="target-count">—</span><small id="target-kind">TARGETS</small></div><div><span id="dataset-count">—</span><small>DATASETS</small></div><div><span id="file-size">—</span><small>INDEX SIZE</small></div><div><span>WASM</span><small>LOCAL DECODING</small></div></div>
+      <div class="workspace">
+        <aside class="card">
+          <h2>Build your view</h2><p class="muted">Search, then select targets and datasets.</p>
+          <label for="targets-search" id="targets-label">Exons / genes</label><input id="targets-search" type="search" placeholder="Search name or #ID">
+          <div id="targets" class="choices" role="group" aria-label="Targets"></div><small id="targets-note"></small>
+          <label for="target-list">Paste target names or #IDs</label><textarea id="target-list" rows="2" placeholder="One per line"></textarea><button id="apply-targets" class="secondary">Select target list</button>
+          <label for="datasets-search">Datasets</label><input id="datasets-search" type="search" placeholder="Search dataset names">
+          <div id="datasets" class="choices" role="group" aria-label="Datasets"></div><small id="datasets-note"></small>
+          <label for="dataset-list">Paste dataset names</label><textarea id="dataset-list" rows="2" placeholder="One per line"></textarea><button id="apply-datasets" class="secondary">Select dataset list</button>
+          <div class="range"><div><label for="min">Min count</label><input id="min" inputmode="numeric" placeholder="0"></div><div><label for="max">Max count</label><input id="max" inputmode="numeric" placeholder="No limit"></div></div>
+          <label for="scale">Color scale</label><select id="scale"><option value="log">Logarithmic · log₁₀(count + 1)</option><option value="linear">Linear</option></select>
+          <button id="draw" class="button full">Visualize selection</button><button id="clear" class="secondary full">Clear selection</button>
+        </aside>
+        <section class="card visualization">
+          <div class="view-heading"><div><p class="eyebrow">ABUNDANCE HEATMAP</p><h2 id="view-title">Select your first comparison</h2></div><button id="download" class="secondary" disabled>Export CSV ↓</button></div>
+          <p class="muted">Rows are targets; columns are datasets. Hover or focus a cell to see its count.</p>
+          <div id="empty" class="empty"><span>▦</span><h3>A clearer view of your data</h3><p>Select targets and datasets on the left, then visualize.</p></div>
+          <div id="heatmap" class="heatmap" hidden></div>
+          <div id="legend" class="legend" hidden><span id="legend-min">0</span><div class="gradient"></div><span id="legend-max">0</span><small>Gray cells are outside the selected range.</small></div>
+          <p class="footnote">Counts are decoded, approximate k-mer observations; they are not TPM. Bounds are inclusive. Out-of-range cells export as empty fields, never as zero. The global sum was computed before quantization.</p>
+        </section>
+      </div>
+    </div>
+  </main>
+  <footer>EXPRESSO / Exon and gene abundance · No uploads, no external services</footer>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

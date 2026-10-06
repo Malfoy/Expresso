@@ -1,11 +1,38 @@
 mod abundance;
 mod compact;
+mod eab;
 mod exons;
 mod export;
 mod index;
 mod input;
 mod output;
+mod portable;
 mod quantify;
+mod viewer;
+
+#[derive(
+    Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum Level {
+    #[default]
+    Exon,
+    Gene,
+}
+impl Level {
+    pub fn columns(self) -> [&'static str; 2] {
+        match self {
+            Self::Exon => ["exon_id", "exon_name"],
+            Self::Gene => ["gene_id", "gene_name"],
+        }
+    }
+    pub fn table(self) -> &'static str {
+        match self {
+            Self::Exon => "exons.csv",
+            Self::Gene => "genes.csv",
+        }
+    }
+}
 
 use anyhow::{Result, ensure};
 use clap::{Args, Parser, Subcommand};
@@ -27,12 +54,24 @@ enum Command {
     /// Extract strand-oriented exon FASTA from a GTF and reference genome FASTAs.
     #[command(visible_alias = "exons")]
     ExtractExons(ExtractExonsArgs),
-    /// Build reusable GGCAT simplitigs, Rust SSHash, and exon ownership tables.
+    /// Build reusable GGCAT simplitigs, Rust SSHash, and exon or gene ownership tables.
     Build(BuildArgs),
     /// Count a file-of-files against a previously built index.
     Quantify(QuantifyArgs),
     /// Decode compact abundance vectors into CSVs (one abundance column by default).
     Export(ExportArgs),
+    /// Package compact results into a single indexed file for the WebAssembly viewer.
+    Pack {
+        #[arg(short, long)]
+        input: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    /// Serve the bundled WebAssembly abundance viewer on localhost.
+    View {
+        #[arg(long, default_value_t = 8765)]
+        port: u16,
+    },
     /// Build an index and quantify in one invocation.
     Run {
         #[command(flatten)]
@@ -49,8 +88,11 @@ enum Command {
 
 #[derive(Args)]
 pub struct BuildArgs {
-    /// FASTA: one exon per record (wrapped sequences are accepted).
-    #[arg(short, long, required_unless_present = "gtf", conflicts_with_all = ["gtf", "genome"])]
+    /// Quantification target: exon or gene. Gene FASTA records with the same ID are grouped.
+    #[arg(long, value_enum, default_value = "exon")]
+    level: Level,
+    /// Reference FASTA; gene mode groups records with the same first header token.
+    #[arg(short, long, visible_alias = "genes", required_unless_present = "gtf", conflicts_with_all = ["gtf", "genome"])]
     exons: Option<PathBuf>,
     /// Generate exons from this GTF instead of supplying --exons.
     #[arg(long, requires = "genome")]
@@ -108,6 +150,9 @@ pub struct QueryOptions {
     /// Compact bit-packed vectors, or legacy exact CSV output.
     #[arg(long, value_enum, default_value_t = output::Format::Compact)]
     format: output::Format,
+    /// Also write abundance.eai for direct loading in the WebAssembly viewer (compact output only).
+    #[arg(long)]
+    viewer_index: bool,
     /// Bits per abundance in compact output; 8 means one byte before compression.
     #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u8).range(2..=16))]
     bits: u8,
@@ -127,7 +172,7 @@ pub struct QueryOptions {
 
 #[derive(Args)]
 pub struct ExportArgs {
-    /// Compact EXPRESSO result directory, including its shared reference table.
+    /// Compact EXPRESSO result directory or packed .eai viewer index.
     #[arg(short, long)]
     input: PathBuf,
     /// New destination directory for exported CSVs.
@@ -136,10 +181,28 @@ pub struct ExportArgs {
     /// Export only these datasets (repeat the flag); defaults to all plus global.
     #[arg(long, conflicts_with = "global_only")]
     dataset: Vec<String>,
+    /// Dataset names, one per line; combined with --dataset.
+    #[arg(long, conflicts_with = "global_only")]
+    dataset_list: Option<PathBuf>,
+    /// Target names to export; repeat to select more (also --exon or --gene).
+    #[arg(long, visible_aliases = ["exon", "gene"])]
+    target: Vec<String>,
+    /// Target names, one per line; combined with --target.
+    #[arg(long, visible_alias = "exon-list")]
+    target_list: Option<PathBuf>,
+    /// Explicit 1-based target IDs; repeat to select more.
+    #[arg(long)]
+    target_id: Vec<usize>,
+    /// Inclusive lower bound on decoded abundance. Nonmatching rows are omitted.
+    #[arg(long)]
+    min_value: Option<u64>,
+    /// Inclusive upper bound on decoded abundance. Nonmatching rows are omitted.
+    #[arg(long)]
+    max_value: Option<u64>,
     /// Export only the global vector and optional statistics.
     #[arg(long)]
     global_only: bool,
-    /// Include exon_id and exon_name columns; default CSVs contain abundance only.
+    /// Include target ID and name columns; default CSVs contain abundance only.
     #[arg(long)]
     with_names: bool,
     #[arg(long, value_enum, default_value_t = output::Compression::Zstd)]
@@ -177,7 +240,13 @@ fn main() -> Result<()> {
         Command::Build(args) => index::build(&args),
         Command::Quantify(args) => quantify::run(&args.index, args.threads, &args.query),
         Command::Export(args) => export::run(&args),
+        Command::Pack { input, output } => portable::pack(&input, &output),
+        Command::View { port } => viewer::serve(port),
         Command::Run { build, query } => {
+            ensure!(
+                !query.viewer_index || query.format == output::Format::Compact,
+                "--viewer-index requires --format compact"
+            );
             ensure!(
                 !query.output.exists(),
                 "output already exists: {}",
