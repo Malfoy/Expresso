@@ -1,6 +1,8 @@
 const $ = id => document.getElementById(id);
 let file, catalog, targetSelection = new Set(), datasetSelection = new Set(), matrix, worker;
 let nextRequest = 0, busy = false, selectionVersion = 0;
+const PAGE_ROWS = 100, PAGE_COLUMNS = 25;
+let pageRows = 0, pageColumns = 0;
 const pending = new Map();
 function status(message, error = false) { $('status').textContent = message; $('status').classList.toggle('error', error); }
 function resetWorker() {
@@ -34,6 +36,8 @@ function invalidate() {
   $('heatmap').hidden = true;
   $('legend').hidden = true;
   $('empty').hidden = false;
+  $('paging').hidden = true;
+  $('export-selection').disabled = true;
 }
 function choices(kind) {
   const targets = kind === 'targets';
@@ -102,7 +106,7 @@ function color(fraction) {
   return `rgb(${rgb.join(',')})`;
 }
 function render() {
-  if (!matrix) return;
+  if (!matrix?.columns) return;
   const {min,max} = bounds();
   let highest = 0n;
   for (const column of matrix.columns) for (const value of column) if (value>=min && value<=max && value>highest) highest=value;
@@ -143,25 +147,131 @@ $('download').addEventListener('click', () => {
     const a=document.createElement('a'); a.href=url; a.download='expresso-selection.csv'; a.click(); setTimeout(()=>URL.revokeObjectURL(url),1000);
   } catch (error) { status(error.message,true); }
 });
-$('draw').addEventListener('click', async () => {
-  if (!catalog || busy) return;
+async function loadPage() {
+  if (!matrix || busy) return;
+  const current=matrix, version=selectionVersion;
   try {
-    bounds();
-    const targets=[...targetSelection].sort((a,b)=>a-b), datasets=[...datasetSelection].sort((a,b)=>a-b);
-    if (!targets.length || !datasets.length) throw new Error('Select at least one target and one dataset.');
-    if (targets.length>200 || datasets.length>100) throw new Error('Select at most 200 targets and 100 datasets per view. Use CLI export for larger selections.');
     busy=true; $('draw').disabled=true; $('file').disabled=true;
-    matrix=undefined; $('download').disabled=true;
-    const version=selectionVersion, columns=[];
+    $('download').disabled=true; $('export-selection').disabled=true;
+    for (const id of ['prev-rows','next-rows','prev-columns','next-columns']) $(id).disabled=true;
+    bounds();
+    const targets=current.allTargets.slice(pageRows,pageRows+PAGE_ROWS);
+    const datasets=current.allDatasets.slice(pageColumns,pageColumns+PAGE_COLUMNS);
+    const columns=[];
     for (const [j,i] of datasets.entries()) {
-      status(`Decoding dataset ${j+1} of ${datasets.length}: ${catalog.datasets[i].name}`);
+      status(`Loading visible dataset ${j+1} of ${datasets.length}: ${catalog.datasets[i].name}`);
       columns.push((await decode(catalog.datasets[i],targets)).map(BigInt));
     }
-    // Store only selected values; full dataset vectors are freed in the worker.
-    if (version!==selectionVersion) throw new Error('Selection changed during decoding. Visualize the new selection.');
-    matrix={targets,datasets,columns}; render(); status('Selection ready. Counts decoded locally with WebAssembly.');
-  } catch (error) { status(error.message,true); }
-  finally { busy=false; $('draw').disabled=false; $('file').disabled=false; }
+    if (version!==selectionVersion || matrix!==current) throw new Error('Selection changed during loading. Visualize the new selection.');
+    Object.assign(current,{targets,datasets,columns});
+    render(); $('paging').hidden=false; $('export-selection').disabled=false;
+    $('row-position').value=pageRows+1; $('column-position').value=pageColumns+1;
+    $('page-summary').textContent=`Targets ${pageRows+1}–${pageRows+targets.length} of ${current.allTargets.length.toLocaleString()} · datasets ${pageColumns+1}–${pageColumns+datasets.length} of ${current.allDatasets.length.toLocaleString()}`;
+    $('prev-rows').disabled=pageRows===0; $('next-rows').disabled=pageRows+PAGE_ROWS>=current.allTargets.length;
+    $('prev-columns').disabled=pageColumns===0; $('next-columns').disabled=pageColumns+PAGE_COLUMNS>=current.allDatasets.length;
+    $('view-title').textContent=`${current.allTargets.length.toLocaleString()} ${catalog.level==='gene'?'genes':'exons'} × ${current.allDatasets.length.toLocaleString()} datasets`;
+    status('Visible counts ready. Other abundance blocks remain on disk until requested.');
+  } catch (error) {
+    status(error.message,true);
+    if (matrix===current) { $('heatmap').hidden=true; $('legend').hidden=true; }
+  } finally { busy=false; $('draw').disabled=false; $('file').disabled=false; }
+}
+$('draw').addEventListener('click', () => {
+  if (!catalog || busy) return;
+  const targets=[...targetSelection].sort((a,b)=>a-b), datasets=[...datasetSelection].sort((a,b)=>a-b);
+  if (!targets.length || !datasets.length) { status('Select at least one target and one dataset.',true); return; }
+  pageRows=0; pageColumns=0;
+  matrix={allTargets:targets,allDatasets:datasets};
+  loadPage();
+});
+for (const [id,axis,direction] of [['prev-rows','row',-1],['next-rows','row',1],['prev-columns','column',-1],['next-columns','column',1]]) {
+  $(id).addEventListener('click', () => {
+    if (!matrix || busy) return;
+    if (axis==='row') pageRows+=direction*PAGE_ROWS; else pageColumns+=direction*PAGE_COLUMNS;
+    loadPage();
+  });
+}
+$('jump-page').addEventListener('click', () => {
+  if (!matrix || busy) return;
+  const row=Number($('row-position').value), column=Number($('column-position').value);
+  if (!Number.isSafeInteger(row) || !Number.isSafeInteger(column) || row<1 || row>matrix.allTargets.length || column<1 || column>matrix.allDatasets.length) {
+    status('Enter positions within the selected target and dataset ranges.',true); return;
+  }
+  pageRows=Math.floor((row-1)/PAGE_ROWS)*PAGE_ROWS;
+  pageColumns=Math.floor((column-1)/PAGE_COLUMNS)*PAGE_COLUMNS;
+  loadPage();
+});
+function selectMatches(kind) {
+  if (!catalog || busy) return;
+  const target=kind==='targets', entries=target?catalog.targets:catalog.datasets;
+  const selection=target?targetSelection:datasetSelection, query=$(kind+'-search').value.trim().toLowerCase();
+  entries.forEach((entry,i)=>{
+    if (!query || entry.name.toLowerCase().includes(query) || (target && '#'+(i+1)===query)) selection.add(i);
+  });
+  invalidate(); choices(kind);
+}
+$('select-targets').addEventListener('click',()=>selectMatches('targets'));
+$('select-datasets').addEventListener('click',()=>selectMatches('datasets'));
+
+let exportDirectory, exportFiles=[];
+$('export-selection').addEventListener('click', async () => {
+  if (!matrix || busy) return;
+  const current=matrix, version=selectionVersion;
+  let stream, name;
+  try {
+    const {min,max}=bounds();
+    busy=true; $('draw').disabled=true; $('file').disabled=true; $('export-selection').disabled=true;
+    if (!navigator.storage?.getDirectory) throw new Error('This browser does not support streaming CSV to local storage. Use CLI export.');
+    const root=await navigator.storage.getDirectory();
+    exportDirectory=await root.getDirectoryHandle('expresso-exports',{create:true});
+    name=crypto.randomUUID()+'.csv';
+    const handle=await exportDirectory.getFileHandle(name,{create:true});
+    stream=await handle.createWritable();
+    const gene=catalog.level==='gene';
+    await stream.write([gene?'gene_id':'exon_id',gene?'gene_name':'exon_name','dataset','abundance'].map(csvCell).join(',')+'\r\n');
+    let rows=0;
+    for (const [j,dataset] of current.allDatasets.entries()) {
+      status(`Exporting dataset ${j+1} of ${current.allDatasets.length}: ${catalog.datasets[dataset].name}`);
+      // Dataset-major order lets the worker reuse one packed vector for every target chunk.
+      for (let start=0;start<current.allTargets.length;start+=512) {
+        if (version!==selectionVersion) throw new Error('Selection changed during export.');
+        const targets=current.allTargets.slice(start,start+512), values=await decode(catalog.datasets[dataset],targets);
+        let chunk='';
+        values.forEach((text,i)=>{
+          const value=BigInt(text);
+          if (value>=min && value<=max) {
+            const target=targets[i];
+            chunk+=[target+1,catalog.targets[target].name,catalog.datasets[dataset].name,text].map(csvCell).join(',')+'\r\n';
+            rows++;
+          }
+        });
+        if (chunk) await stream.write(chunk);
+      }
+    }
+    await stream.close(); stream=undefined;
+    exportFiles.push(name); $('clear-export').hidden=false;
+    const output=await handle.getFile(), url=URL.createObjectURL(output);
+    const a=document.createElement('a'); a.href=url; a.download='expresso-selection.csv'; a.click();
+    // Retain the disk-backed file until the user finishes downloading and clears it.
+    exportFiles[exportFiles.length-1]={name,url};
+    status(`Exported ${rows.toLocaleString()} matching counts. Download started; clear the temporary CSV after it finishes.`);
+  } catch (error) {
+    if (stream) await stream.abort().catch(()=>{});
+    if (name && exportDirectory && !exportFiles.some(file=>(file.name||file)===name)) await exportDirectory.removeEntry(name).catch(()=>{});
+    status(error.message,true);
+  } finally {
+    busy=false; $('draw').disabled=false; $('file').disabled=false;
+    $('export-selection').disabled=!matrix?.columns;
+  }
+});
+$('clear-export').addEventListener('click', async () => {
+  try {
+    for (const file of exportFiles) {
+      if (file.url) URL.revokeObjectURL(file.url);
+      await exportDirectory.removeEntry(file.name||file);
+    }
+    exportFiles=[]; $('clear-export').hidden=true; status('Temporary CSV files removed.');
+  } catch(error) {status(error.message,true);}
 });
 $('file').addEventListener('change', async event => {
   try {

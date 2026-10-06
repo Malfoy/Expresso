@@ -406,22 +406,44 @@ an index does **not** upload it. Target/dataset searches, pasted name or `#ID`
 lists, count bounds, logarithmic or linear coloring, and CSV download all run
 locally. The global sum and stored statistics are selectable alongside datasets.
 
-The browser reads the catalogue and only the selected dataset blocks from the
-local file. Rust/WebAssembly decompresses zstd and validates the shared EAB
-format, reference fingerprint, and checksum. Only selected counts return to the
-page; decimal strings and JavaScript `BigInt` preserve all 64-bit integer values.
-Heatmap colors use floating point, while displayed/exported counts remain
-integers. Cells outside the inclusive bounds are gray and export as empty CSV
-fields, preserving the distinction from zero. Browser CSV is a target-by-dataset
-matrix; CLI CSVs remain one file per dataset.
+Opening a file reads the catalogue (target names, metadata, and vector offsets),
+**not the abundance blocks**. Counts are read only after a visualization or
+export request. Selections have no 200 × 100 size cap: select all matching
+names, paste lists, or select individual targets/datasets.
 
-Each view supports up to **200 targets × 100 datasets**. Search results show the
-first 150 matches; narrow the search or paste names/IDs to select others. The
-catalogue must fit in browser memory and is limited to 256 MiB; one full
-selected vector is decoded at a time. File bytes are read on demand, but this
-is not a guarantee that arbitrary corpus-scale metadata will fit every browser.
-Use CLI export for larger selections. Open through `expresso view`, rather than
-`file://`, so WebAssembly, workers, and the checksum API are available.
+The heatmap displays pages of 100 targets × 25 datasets. Use the navigation
+buttons or jump directly to target/dataset positions in your selection. Each page reads
+only the visible datasets and returns only the visible target counts. The rest
+of the selected matrix is neither decoded nor retained in RAM. Colors scale to
+the current page, so compare cells on that page using its legend.
+
+With EAI v1, each dataset is one zstd frame. Reading any target from it requires
+decompressing that dataset block; the viewer cannot seek directly to a target
+inside the compressed frame. Rust/WebAssembly validates the EAB reference,
+checksum, padding, and codes and keeps **one bit-packed vector** cached, rather
+than a full array of decoded counts. Changing dataset evicts that cache. At 8
+bits, its abundance payload is approximately one byte per reference target.
+Only requested counts cross back to the page, as decimal strings; JavaScript
+`BigInt` preserves the entire 64-bit integer range. No other abundance vectors
+are read until requested. WebAssembly retains its peak linear-memory capacity
+for reuse even after allocations are freed.
+
+**Visible CSV** exports the displayed target-by-dataset matrix, with blank
+fields for out-of-range cells. **Full selection CSV** streams the entire
+selection in long format (`target_id,target_name,dataset,abundance`, using exon
+or gene column names). It applies inclusive bounds and omits nonmatching rows.
+Export processes one dataset at a time, extracts up to 512 requested counts per
+chunk, and writes to local browser temporary storage; it does not accumulate the
+CSV or selected matrix in RAM. Download the finished file, then use **Clear
+temporary CSV** to remove that local copy. Temporary export storage is subject
+to the browser's disk quota. CLI exports remain one CSV per dataset.
+
+Memory therefore depends on the catalogue, selected ID lists, one dataset's compressed/bit-packed
+vector and decompressor, and the current page/export chunk, rather than the
+whole abundance file or selected matrix. The catalogue must still fit in memory
+and EAI v1 limits it to 256 MiB; this is a metadata limit, not an abundance-file
+size limit. Open through `expresso view`, rather than `file://`, so WebAssembly,
+workers, local temporary storage, and checksums are available.
 
 The app's Rust source and a prebuilt WASM module are included. To rebuild it:
 
@@ -459,6 +481,16 @@ cargo fmt --check
 cargo test --locked
 cargo clippy --all-targets --locked -- -D warnings
 env RUSTFLAGS= cargo test --manifest-path viewer/wasm/Cargo.toml --locked
+```
+
+An optional Rust browser test checks a 300-target × 151-vector selection,
+on-demand reads, page navigation, full streamed CSV, and 64-bit values. With
+Firefox and geckodriver installed, start the driver in another terminal and run:
+
+```bash
+geckodriver --host 127.0.0.1 --port 4444
+# In another terminal:
+cargo test --test viewer_browser --locked -- --ignored
 ```
 
 Rust tests cover the EAB codecs and bit widths, integer boundaries, integrity
