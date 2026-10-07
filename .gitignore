@@ -6,6 +6,9 @@ __pycache__/
 /example-index/
 /example-results/
 /example-csv/
+/viewer-demo-index/
+/viewer-demo-results/
+/viewer-demo-csv/
 /exon-index/
 /results/
 /run-*/

@@ -55,6 +55,10 @@ set. `--features no-pdep` is available for older AMD CPUs.
 
 ## Quick start
 
+To try the browser interface immediately, follow the
+[WebAssembly viewer toy walkthrough](#try-the-viewer-with-the-included-toy-dataset).
+It includes a ready-to-open index and all inputs needed to reproduce it.
+
 Run the included small example:
 
 ```bash
@@ -244,9 +248,9 @@ expresso quantify --index gene-index --fof datasets.tsv \
 quantification level is saved in the index, so `quantify` reuses it automatically.
 
 Gene mode requires `gene_id` on annotated exons. Within each gene, overlapping
-exon intervals on the same contig and strand are merged. Separated intervals
-remain separate FASTA records: introns and artificial exon junctions are never
-introduced. All records bearing the same gene ID share one owner. A k-mer
+exon intervals on the same contig and strand are merged. By default, separated
+intervals remain separate FASTA records and no junction sequences are added.
+All records bearing the same gene ID share one owner. A k-mer
 present in multiple exons of one gene remains usable, while one shared between
 different genes is excluded. This cannot be recovered by simply summing an
 existing exon index; build a gene index to obtain the correct ownership.
@@ -261,6 +265,55 @@ Alternatively supply FASTA with `--level gene --genes genes.fa`. Records with
 the same first header token are grouped into one gene; disconnected sequences
 must be separate records, rather than concatenated. Duplicate gene IDs are
 intentional in this mode. Length is the sum of supplied record lengths.
+
+### Exon junctions
+
+Add junction k-mers when building a gene index directly from GTF and genome:
+
+```bash
+# Junctions between consecutive exons of annotated transcripts.
+expresso build --level gene \
+  --gtf annotation.gtf.gz --genome genome.fa.gz \
+  --junctions annotated --index gene-junction-index --k 31 --threads 16
+
+# Annotated junctions plus every ordered pair of distinct, non-overlapping
+# merged exons in genes with at most 50 merged exons, including reverse order.
+expresso build --level gene \
+  --gtf annotation.gtf.gz --genome genome.fa.gz \
+  --junctions all --junction-max-exons 50 \
+  --index gene-all-junction-index --k 31 --threads 16
+```
+
+`--junctions none` is the default. `run` accepts the same options. Junction
+options require `--level gene`, `--gtf`, and `--genome`; they are unavailable in
+exon mode or when supplying a reference FASTA. Each annotated exon must have
+exactly one `gene_id` and `transcript_id`. Transcript exons are sorted by genomic
+coordinates in strand order; duplicate rows are deduplicated, and overlapping
+exons within a transcript or inconsistent gene/transcript membership are errors.
+
+Annotated mode uses up to `k-1` transcript bases on each side of each junction.
+This includes k-mers spanning several annotated junctions around short exons.
+All mode first merges intersecting exon intervals within each gene on the same
+contig and strand. Each merged exon spans the minimum start to the maximum end;
+overlap chains are merged transitively, while adjacent intervals without a
+shared base remain separate. It then joins each merged exon's last `k-1` bases
+to another's first `k-1` bases, respecting the gene's strand but allowing both
+exon orders. It includes exon skipping and reverse-order/back-splice candidates. It excludes
+self-pairs, overlapping exon pairs, and unannotated chains of three or more
+exons. A short pair contributes only the k-mers its available sequence supports.
+Candidate junctions are not evidence that those junctions occur biologically.
+
+The limit counts merged exons per gene and applies only to exhaustive pair
+generation. Genes above the limit still receive all their annotated junction
+contexts. The work per expanded gene grows quadratically with its exon count. `metadata.json`
+records the mode, limit, exon counting definition, annotated boundary count,
+additional ordered boundary pairs, emitted sequence records, and expanded/
+above-limit gene counts.
+
+Junction records appear in `reference-genes.fa` with `kind=junction` and donor/
+acceptor coordinates. They share their gene's owner and do not increase its
+reported exonic length. The dictionary stores distinct canonical k-mers: repeats
+within one gene count once, and k-mers shared between genes are excluded as usual.
 
 ## Outputs and CSV export
 
@@ -376,6 +429,132 @@ is `exons.csv.zst` or `genes.csv.zst`; exact CSV output uses the uncompressed ta
 
 ### Portable abundance index and WebAssembly viewer
 
+#### Try the viewer with the included toy dataset
+
+The repository includes [examples/viewer/toy.eai](examples/viewer/toy.eai), a
+ready-to-open portable abundance index. It contains **six synthetic genes,
+four unitig datasets, the global sum, and five statistics**. No biological data
+download or index construction is needed to try it. The artificial samples
+have stronger `GENE_A` signal in group A, stronger `GENE_B` signal in group B,
+a constant `HOUSEKEEPING` signal, and an entirely absent `GENE_EMPTY`.
+
+**1. Start the local application.** After installing EXPRESSO, run from the
+repository root:
+
+```bash
+expresso view --port 8765
+```
+
+Keep that terminal running and open **http://127.0.0.1:8765** in a current
+Firefox or Chromium-based browser. The command prints the URL; it does not
+automatically open a browser. If that port is occupied, choose another, such as
+`--port 9000`. Stop the server with Ctrl+C when finished.
+
+**2. Open the toy index.** Click **Choose index** and select
+`examples/viewer/toy.eai` from your checkout. The summary should show **6 genes
+and 4 datasets**. The global sum and statistics also appear in the dataset
+selector, marked separately. Opening the file loads its catalogue; counts are
+read when you request a view. The selected file stays on your computer.
+
+**3. Draw the first heatmap.** Leave the gene search empty and click
+**Select all matching targets**. Type `sample_` in the **Datasets** search and
+click **Select all matching datasets**. This selects the four samples without
+the global/statistic vectors. Leave count bounds blank, then click
+**Visualize selection**. You should see a **6 × 4** heatmap:
+
+| Gene | sample_A1 | sample_A2 | sample_B1 | sample_B2 |
+| --- | ---: | ---: | ---: | ---: |
+| GENE_A | 4,080 | 3,060 | 68 | 102 |
+| GENE_B | 68 | 102 | 3,740 | 4,420 |
+| GENE_C | 0 | 0 | 340 | 510 |
+| GENE_D | 34 | 0 | 0 | 34 |
+| HOUSEKEEPING | 680 | 680 | 680 | 680 |
+| GENE_EMPTY | 0 | 0 | 0 | 0 |
+
+These are weighted k-mer observations, not read counts or TPM. Each synthetic
+gene has 34 distinct usable canonical 7-mers, so a full-length unitig with
+header abundance 20 contributes `34 × 20 = 680`. This demo uses 16 bits and
+counts below 65,536, which are represented exactly. Normal runs default to
+8 bits and may approximate larger values. Expected sample and global counts
+are also provided in [expected-counts.csv](examples/viewer/expected-counts.csv).
+
+**4. Explore the display controls.** Try the following changes:
+
+- Check **Hide all-zero rows**, then click **Apply view options**. `GENE_EMPTY`
+  disappears and the view becomes **5 × 4**. Only rows zero across every
+  selected dataset are hidden; `GENE_C` remains because group B has signal.
+- Set **Sort targets** to **Total abundance · highest first**, then apply.
+  `GENE_B` moves to the top. Dataset sorting uses the selected targets;
+  target sorting uses the selected datasets. You can also sort by name,
+  maximum count, or number of nonzero counts.
+- Set **Number format** to **Compact · K / M / G / T** to display `4080` as
+  `4.08K`, or **Scientific · 3 significant digits** to display `4.08e+3`.
+- Set **Cell values** to **log₁₀(count + 1)**. This changes the displayed
+  numbers; **Color scale** independently chooses logarithmic or linear
+  heatmap coloring. Hover or focus a cell to inspect its full decoded count.
+- Enter `100` in **Min count**, leave **Max count** blank, and visualize again.
+  Counts below 100 become gray. Bounds apply to the decoded counts, even
+  when log values are displayed. Clear the bound to restore the full view.
+
+Target/dataset searches filter the choices, not an existing selection. Checkbox
+selections, **Select all matching**, and pasted lists add to the selection.
+Use **Clear selection** to start another comparison. To compare just two genes,
+paste the following into **Paste target names or #IDs**, click **Select target
+list**, select the four `sample_` datasets again, and visualize:
+
+```text
+GENE_A
+GENE_B
+```
+
+Original numeric IDs work too, for example `#1` and `#2`. Dataset lists use
+their exact names, one per line. To inspect the aggregate, search for `global`
+in the dataset selector and select it. Its `GENE_A` count is **7,310**. Stored
+`mean`, `median`, `min`, `max`, and `datasets_detected` vectors are also available; these
+are statistics rather than additional biological samples.
+
+**5. Download your selection.** **Visible CSV** downloads the current page as
+a target-by-dataset matrix. **Full selection CSV** downloads all selected pages
+in long format, one matching target/dataset/count per row. With bounds, visible
+CSV uses blank fields for excluded cells; full-selection CSV omits them.
+Exports follow applied sorting and zero-row hiding, and always contain decoded
+integer counts, regardless of log or number formatting. After a full export
+finishes downloading, click **Clear temporary CSV** to remove its browser-local
+temporary file. **Cancel operation** stops a running load, scan, or export.
+
+The toy fits on one page. Larger selections use pages of **100 targets × 25
+datasets**; navigate with the arrow buttons or **Go to position**. The viewer
+does not load the entire abundance matrix into memory. Hiding zero rows and
+sorting by abundance scan the selected vectors on request and retain summaries.
+Colors scale to the current page; use the legend when comparing values.
+
+**6. Reproduce the toy index from its FASTA inputs (optional).** From the
+repository root, with new output directories:
+
+```bash
+expresso run --level gene --genes examples/viewer/genes.fa \
+  --index viewer-demo-index --k 7 \
+  --fof examples/viewer/datasets.tsv --output viewer-demo-results \
+  --threads 4 --jobs 2 --bits 16 --stats --viewer-index
+```
+
+Open `viewer-demo-results/abundance.eai` with **Choose index** to get the same
+counts. [datasets.tsv](examples/viewer/datasets.tsv) uses actual tab separators
+and paths relative to its own directory. All sequences are synthetic; group
+labels are illustrative and have no biological interpretation.
+
+To check or export the bundled file without a browser:
+
+```bash
+expresso export --input examples/viewer/toy.eai \
+  --output viewer-demo-csv --compression none --with-names
+```
+
+This writes one CSV per sample and a global CSV containing the sum and stored
+statistics. Exporting an `.eai` needs no k-mer index or original input datasets.
+
+#### Open your own results
+
 ```bash
 # Package a completed compact result directory, including its global sum.
 expresso pack --input results --output abundance.eai
@@ -392,6 +571,12 @@ expresso export --input abundance.eai --output selected-csv \
 with `--viewer-index` (compact output only). This keeps the standard result files
 and adds a portable copy.
 
+Use a compact result directory as input to `pack`, or an `.eai` file in the
+browser's **Choose index** dialog. The SSHash construction index, input FASTA,
+individual `.eab` vectors, and result directories are not directly loadable in
+the viewer. Existing exact CSV results cannot be packed; produce compact output
+when quantifying if you want a portable viewer index.
+
 `pack` accepts compact results with any supported compression, including older
 EAB v1 exon results. It validates every vector and writes a new `.eai` file,
 using one independent zstd frame per vector. Encoded values are preserved
@@ -406,15 +591,35 @@ an index does **not** upload it. Target/dataset searches, pasted name or `#ID`
 lists, count bounds, logarithmic or linear coloring, and CSV download all run
 locally. The global sum and stored statistics are selectable alongside datasets.
 
+Cell values can display decoded integer counts or `log10(count + 1)`, independently
+of the color scale. Choose full integers, compact `K/M/G/T` suffixes (powers of
+1,000), or scientific notation with three significant digits. Log values use
+three significant digits. Hover or focus a cell to see its full decoded count.
+CSV exports retain decoded integer counts regardless of display formatting.
+
+**Hide all-zero rows** checks every selected dataset, including datasets on other
+pages. Sort targets and datasets by original order, name, total abundance,
+maximum abundance, or number of nonzero counts. Name sorting reads metadata only;
+zero-row hiding and abundance sorting scan the selected counts once, on request,
+in chunks of at most 4,096 targets. The viewer retains per-target/per-dataset
+summaries and one packed dataset vector, without retaining the full matrix.
+Summaries are reused until the target/dataset selection changes. Totals and
+comparisons preserve integer precision above `u64::MAX`. Sorting uses counts
+across the full selection, before min/max filtering; ties preserve original IDs.
+Choose the options, then click **Visualize selection** or **Apply view options**. **Cancel operation**
+stops loading/scanning/exporting between chunks. CSVs follow the applied order
+and exclude rows hidden by the all-zero filter.
+
 Opening a file reads the catalogue (target names, metadata, and vector offsets),
 **not the abundance blocks**. Counts are read only after a visualization or
 export request. Selections have no 200 × 100 size cap: select all matching
 names, paste lists, or select individual targets/datasets.
 
 The heatmap displays pages of 100 targets × 25 datasets. Use the navigation
-buttons or jump directly to target/dataset positions in your selection. Each page reads
-only the visible datasets and returns only the visible target counts. The rest
-of the selected matrix is neither decoded nor retained in RAM. Colors scale to
+buttons or jump directly to target/dataset positions in your selection. Normal
+paging reads only the visible datasets and returns only visible target counts.
+Requested zero-row hiding and abundance sorting additionally stream the selected
+counts into summaries; the selected matrix is never retained in RAM. Colors scale to
 the current page, so compare cells on that page using its legend.
 
 With EAI v1, each dataset is one zstd frame. Reading any target from it requires
@@ -439,11 +644,20 @@ temporary CSV** to remove that local copy. Temporary export storage is subject
 to the browser's disk quota. CLI exports remain one CSV per dataset.
 
 Memory therefore depends on the catalogue, selected ID lists, one dataset's compressed/bit-packed
-vector and decompressor, and the current page/export chunk, rather than the
+vector and decompressor, optional row/column summaries, and the current page/scan/export chunk, rather than the
 whole abundance file or selected matrix. The catalogue must still fit in memory
 and EAI v1 limits it to 256 MiB; this is a metadata limit, not an abundance-file
 size limit. Open through `expresso view`, rather than `file://`, so WebAssembly,
 workers, local temporary storage, and checksums are available.
+
+If a file fails to open, confirm that it is a complete `.eai` produced by
+`pack` or `--viewer-index`. To diagnose it independently of the browser, try a
+CLI export into a new directory. If **Full selection CSV** reports that local
+storage is unavailable, use a browser with Origin Private File System support
+or CLI export; **Visible CSV** remains available. Large exports may require
+free local disk space and sufficient browser storage quota. Use the localhost
+URL printed by `view`, keep its process running, and refresh after rebuilding
+EXPRESSO to load the updated bundled application.
 
 The app's Rust source and a prebuilt WASM module are included. To rebuild it:
 
@@ -495,7 +709,10 @@ cargo test --test viewer_browser --locked -- --ignored
 
 Rust tests cover the EAB codecs and bit widths, integer boundaries, integrity
 checks, exon and gene ownership, weighted counting, filtered export, portable
-index round trips, global sums, and failures.
+index round trips, global sums, and failures. Junction tests compare annotated
+transcripts and ordered merged-exon pairs against an independent k-mer oracle.
+The viewer example test regenerates the toy index from its FASTA inputs and
+checks both generated and bundled portable files against the documented counts.
 Integration tests use the bundled GGCAT library with an empty `PATH` and compare
 counts with an independent canonical-k-mer oracle. No separate tools or Python
 scripts are needed to run the tests.
