@@ -38,6 +38,10 @@ fn request(mut stream: TcpStream) -> Result<()> {
             "text/javascript; charset=utf-8",
             include_bytes!("../viewer/worker.js"),
         )),
+        "/display.js" => Some((
+            "text/javascript; charset=utf-8",
+            include_bytes!("../viewer/display.js"),
+        )),
         "/expresso_viewer.wasm" => Some((
             "application/wasm",
             include_bytes!("../viewer/expresso_viewer.wasm"),

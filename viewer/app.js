@@ -1,8 +1,10 @@
+import {formatAbundance, makeSummary, needsSummary, sortIds} from './display.js';
 const $ = id => document.getElementById(id);
 let file, catalog, targetSelection = new Set(), datasetSelection = new Set(), matrix, worker;
 let nextRequest = 0, busy = false, selectionVersion = 0;
 const PAGE_ROWS = 100, PAGE_COLUMNS = 25;
 let pageRows = 0, pageColumns = 0;
+let summaryCache;
 const pending = new Map();
 function status(message, error = false) { $('status').textContent = message; $('status').classList.toggle('error', error); }
 function resetWorker() {
@@ -29,8 +31,8 @@ function decode(dataset, selected) {
       request:{targets:catalog.targets.length, reference:catalog.reference, selected}});
   });
 }
-function invalidate() {
-  selectionVersion++;
+function invalidate(selectionChanged=true) {
+  if (selectionChanged) { selectionVersion++; summaryCache=undefined; }
   matrix = undefined;
   $('download').disabled = true;
   $('heatmap').hidden = true;
@@ -38,6 +40,20 @@ function invalidate() {
   $('empty').hidden = false;
   $('paging').hidden = true;
   $('export-selection').disabled = true;
+  $('view-details').textContent='';
+}
+function setBusy(value) {
+  busy=value;
+  for (const id of ['draw','file','hide-empty','row-sort','column-sort','clear','apply-targets','apply-datasets','select-targets','select-datasets','apply-view']) $(id).disabled=value;
+  for (const input of document.querySelectorAll('.choices input')) input.disabled=value;
+  $('cancel').hidden=!value;
+  if (!value) {
+    $('download').disabled=!matrix?.columns || $('heatmap').hidden;
+    $('export-selection').disabled=!matrix?.columns || $('heatmap').hidden;
+  }
+}
+function checkVersion(version) {
+  if (version!==selectionVersion) throw new Error('Operation canceled.');
 }
 function choices(kind) {
   const targets = kind === 'targets';
@@ -51,7 +67,7 @@ function choices(kind) {
     matched++;
     if (matched > 150) return;
     const label = document.createElement('label');
-    const check = document.createElement('input'); check.type = 'checkbox'; check.checked = selection.has(i); check.dataset.index = i;
+    const check = document.createElement('input'); check.type = 'checkbox'; check.checked = selection.has(i); check.dataset.index = i; check.disabled=busy;
     check.addEventListener('change', () => {
       if (check.checked) selection.add(i); else selection.delete(i);
       invalidate(); updateNotes();
@@ -111,6 +127,7 @@ function render() {
   let highest = 0n;
   for (const column of matrix.columns) for (const value of column) if (value>=min && value<=max && value>highest) highest=value;
   const logarithmic = $('scale').value === 'log';
+  const valueMode=$('value-mode').value, numberFormat=$('number-format').value;
   const transform = value => logarithmic ? Math.log10(Number(value)+1) : Number(value);
   const denominator = transform(highest) || 1;
   const table = document.createElement('table'), head = document.createElement('thead'), header = document.createElement('tr');
@@ -126,15 +143,16 @@ function render() {
       const td=document.createElement('td'); td.tabIndex=0;
       const fraction=transform(value)/denominator;
       td.style.background=visible ? color(fraction) : '#edf0ed'; td.style.color=visible && fraction>.62 ? '#fff' : '#254736';
-      td.textContent=visible ? value.toLocaleString() : '—';
-      td.title=`${catalog.targets[id].name} / ${catalog.datasets[matrix.datasets[col]].name}: ${value}${visible ? '' : ' (outside bounds)'}`;
+      td.textContent=visible ? formatAbundance(value,valueMode,numberFormat) : '—';
+      td.title=`${catalog.targets[id].name} / ${catalog.datasets[matrix.datasets[col]].name}: ${value}${valueMode==='log' ? ' · log₁₀(count + 1): '+formatAbundance(value,'log','scientific') : ''}${visible ? '' : ' (outside bounds)'}`;
       td.setAttribute('aria-label',td.title); tr.append(td);
     }); body.append(tr);
   });
   table.append(body); $('heatmap').replaceChildren(table);
-  $('heatmap').hidden=false; $('empty').hidden=true; $('legend').hidden=false; $('download').disabled=false;
-  $('legend-max').textContent=highest.toLocaleString();
-  $('view-title').textContent=`${matrix.targets.length} ${catalog.level === 'gene' ? 'genes' : 'exons'} × ${matrix.datasets.length} datasets`;
+  $('heatmap').hidden=false; $('empty').hidden=true; $('legend').hidden=false; $('download').disabled=busy; $('export-selection').disabled=busy;
+  $('legend-max').textContent=formatAbundance(highest,'raw',numberFormat)+' counts';
+  $('view-details').textContent=`${matrix.hiddenRows ? matrix.hiddenRows.toLocaleString()+' all-zero rows hidden across the selected datasets. ' : ''}Cell values: ${valueMode==='log' ? 'log₁₀(count + 1)' : 'abundance counts'}. CSV exports retain decoded counts.`;
+  $('view-title').textContent=`${matrix.allTargets.length.toLocaleString()} ${catalog.level === 'gene' ? 'genes' : 'exons'} × ${matrix.allDatasets.length.toLocaleString()} datasets`;
 }
 function csvCell(value) { return '"'+String(value).replaceAll('"','""')+'"'; }
 $('download').addEventListener('click', () => {
@@ -151,7 +169,7 @@ async function loadPage() {
   if (!matrix || busy) return;
   const current=matrix, version=selectionVersion;
   try {
-    busy=true; $('draw').disabled=true; $('file').disabled=true;
+    setBusy(true);
     $('download').disabled=true; $('export-selection').disabled=true;
     for (const id of ['prev-rows','next-rows','prev-columns','next-columns']) $(id).disabled=true;
     bounds();
@@ -159,10 +177,11 @@ async function loadPage() {
     const datasets=current.allDatasets.slice(pageColumns,pageColumns+PAGE_COLUMNS);
     const columns=[];
     for (const [j,i] of datasets.entries()) {
+      checkVersion(version);
       status(`Loading visible dataset ${j+1} of ${datasets.length}: ${catalog.datasets[i].name}`);
       columns.push((await decode(catalog.datasets[i],targets)).map(BigInt));
     }
-    if (version!==selectionVersion || matrix!==current) throw new Error('Selection changed during loading. Visualize the new selection.');
+    checkVersion(version);
     Object.assign(current,{targets,datasets,columns});
     render(); $('paging').hidden=false; $('export-selection').disabled=false;
     $('row-position').value=pageRows+1; $('column-position').value=pageColumns+1;
@@ -172,17 +191,61 @@ async function loadPage() {
     $('view-title').textContent=`${current.allTargets.length.toLocaleString()} ${catalog.level==='gene'?'genes':'exons'} × ${current.allDatasets.length.toLocaleString()} datasets`;
     status('Visible counts ready. Other abundance blocks remain on disk until requested.');
   } catch (error) {
-    status(error.message,true);
+    status(error.message,error.message!=='Operation canceled.');
     if (matrix===current) { $('heatmap').hidden=true; $('legend').hidden=true; }
-  } finally { busy=false; $('draw').disabled=false; $('file').disabled=false; }
+  } finally { setBusy(false); }
 }
-$('draw').addEventListener('click', () => {
+async function summarize(targets,datasets,version) {
+  const rows=makeSummary(targets), columns=makeSummary(datasets);
+  const chunkSize=4096;
+  for (const [col,dataset] of datasets.entries()) {
+    for (let start=0;start<targets.length;start+=chunkSize) {
+      checkVersion(version);
+      status(`Scanning selection: dataset ${col+1} of ${datasets.length}, targets ${Math.min(start+chunkSize,targets.length).toLocaleString()} of ${targets.length.toLocaleString()}.`);
+      const values=await decode(catalog.datasets[dataset],targets.slice(start,start+chunkSize));
+      checkVersion(version);
+      values.forEach((text,i)=>{
+        const value=BigInt(text), row=start+i;
+        rows.total[row]+=value; columns.total[col]+=value;
+        if (value>rows.max[row]) rows.max[row]=value;
+        if (value>columns.max[col]) columns.max[col]=value;
+        if (value>0n) { rows.detected[row]++; columns.detected[col]++; }
+      });
+    }
+  }
+  return {version,rows,columns};
+}
+$('draw').addEventListener('click', async () => {
   if (!catalog || busy) return;
-  const targets=[...targetSelection].sort((a,b)=>a-b), datasets=[...datasetSelection].sort((a,b)=>a-b);
+  let targets=[...targetSelection].sort((a,b)=>a-b), datasets=[...datasetSelection].sort((a,b)=>a-b);
   if (!targets.length || !datasets.length) { status('Select at least one target and one dataset.',true); return; }
-  pageRows=0; pageColumns=0;
-  matrix={allTargets:targets,allDatasets:datasets};
-  loadPage();
+  const version=selectionVersion, rowSort=$('row-sort').value, columnSort=$('column-sort').value;
+  const hideEmpty=$('hide-empty').checked, selectedRows=targets.length;
+  invalidate(false);
+  try {
+    setBusy(true); bounds();
+    if (hideEmpty || needsSummary(rowSort) || needsSummary(columnSort)) {
+      if (summaryCache?.version!==version) summaryCache=await summarize(targets,datasets,version);
+      checkVersion(version);
+      if (hideEmpty) targets=targets.filter(id=>summaryCache.rows.detected[summaryCache.rows.index.get(id)]>0);
+    }
+    targets=sortIds(targets,catalog.targets,rowSort,summaryCache?.rows);
+    datasets=sortIds(datasets,catalog.datasets,columnSort,summaryCache?.columns);
+    if (!targets.length) {
+      $('view-details').textContent=`All ${selectedRows.toLocaleString()} selected rows have zero counts across the selected datasets.`;
+      status('No nonzero rows. Disable Hide all-zero rows to display them.');
+      return;
+    }
+    pageRows=0; pageColumns=0;
+    matrix={allTargets:targets,allDatasets:datasets,hiddenRows:selectedRows-targets.length};
+  } catch(error) { status(error.message,error.message!=='Operation canceled.'); }
+  finally { setBusy(false); }
+  if (matrix) await loadPage();
+});
+$('cancel').addEventListener('click',()=>{invalidate();status('Canceling operation…');});
+$('apply-view').addEventListener('click',()=>$('draw').click());
+for (const id of ['hide-empty','row-sort','column-sort']) $(id).addEventListener('change',()=>{
+  invalidate(false); status('View options changed. Visualize selection to apply them.');
 });
 for (const [id,axis,direction] of [['prev-rows','row',-1],['next-rows','row',1],['prev-columns','column',-1],['next-columns','column',1]]) {
   $(id).addEventListener('click', () => {
@@ -220,7 +283,7 @@ $('export-selection').addEventListener('click', async () => {
   let stream, name;
   try {
     const {min,max}=bounds();
-    busy=true; $('draw').disabled=true; $('file').disabled=true; $('export-selection').disabled=true;
+    setBusy(true); $('export-selection').disabled=true;
     if (!navigator.storage?.getDirectory) throw new Error('This browser does not support streaming CSV to local storage. Use CLI export.');
     const root=await navigator.storage.getDirectory();
     exportDirectory=await root.getDirectoryHandle('expresso-exports',{create:true});
@@ -234,8 +297,9 @@ $('export-selection').addEventListener('click', async () => {
       status(`Exporting dataset ${j+1} of ${current.allDatasets.length}: ${catalog.datasets[dataset].name}`);
       // Dataset-major order lets the worker reuse one packed vector for every target chunk.
       for (let start=0;start<current.allTargets.length;start+=512) {
-        if (version!==selectionVersion) throw new Error('Selection changed during export.');
+        checkVersion(version);
         const targets=current.allTargets.slice(start,start+512), values=await decode(catalog.datasets[dataset],targets);
+        checkVersion(version);
         let chunk='';
         values.forEach((text,i)=>{
           const value=BigInt(text);
@@ -248,7 +312,9 @@ $('export-selection').addEventListener('click', async () => {
         if (chunk) await stream.write(chunk);
       }
     }
+    checkVersion(version);
     await stream.close(); stream=undefined;
+    checkVersion(version);
     exportFiles.push(name); $('clear-export').hidden=false;
     const output=await handle.getFile(), url=URL.createObjectURL(output);
     const a=document.createElement('a'); a.href=url; a.download='expresso-selection.csv'; a.click();
@@ -258,10 +324,9 @@ $('export-selection').addEventListener('click', async () => {
   } catch (error) {
     if (stream) await stream.abort().catch(()=>{});
     if (name && exportDirectory && !exportFiles.some(file=>(file.name||file)===name)) await exportDirectory.removeEntry(name).catch(()=>{});
-    status(error.message,true);
+    status(error.message,error.message!=='Operation canceled.');
   } finally {
-    busy=false; $('draw').disabled=false; $('file').disabled=false;
-    $('export-selection').disabled=!matrix?.columns;
+    setBusy(false);
   }
 });
 $('clear-export').addEventListener('click', async () => {
@@ -307,5 +372,7 @@ $('file').addEventListener('change', async event => {
 for (const kind of ['targets','datasets']) $(kind+'-search').addEventListener('input',()=>{if(catalog) choices(kind);});
 $('apply-targets').addEventListener('click',()=>applyList('targets'));
 $('apply-datasets').addEventListener('click',()=>applyList('datasets'));
-for (const id of ['min','max','scale']) $(id).addEventListener('change',()=>{try{render();}catch(error){$('download').disabled=true;status(error.message,true);}});
+for (const id of ['min','max','scale','value-mode','number-format']) $(id).addEventListener('change',()=>{
+  try {render();} catch(error) {$('download').disabled=true;$('export-selection').disabled=true;status(error.message,true);}
+});
 $('clear').addEventListener('click',()=>{targetSelection.clear();datasetSelection.clear();invalidate();choices('targets');choices('datasets');});

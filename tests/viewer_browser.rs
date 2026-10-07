@@ -12,12 +12,14 @@ use std::{
 
 fn webdriver(method: &str, path: &str, value: Value) -> Value {
     let bytes = serde_json::to_vec(&value).unwrap();
-    let mut stream = TcpStream::connect("127.0.0.1:4444")
-        .expect("Start geckodriver --host 127.0.0.1 --port 4444 first");
+    let address = std::env::var("EXPRESSO_WEBDRIVER_ADDRESS")
+        .unwrap_or_else(|_| "127.0.0.1:4444".to_string());
+    let mut stream =
+        TcpStream::connect(&address).expect("Start geckodriver --host 127.0.0.1 --port 4444 first");
     stream
         .set_read_timeout(Some(Duration::from_secs(60)))
         .unwrap();
-    write!(stream,"{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:4444\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",bytes.len()).unwrap();
+    write!(stream,"{method} {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",bytes.len()).unwrap();
     stream.write_all(&bytes).unwrap();
     let mut response = String::new();
     stream.read_to_string(&mut response).unwrap();
@@ -101,8 +103,16 @@ fn large_selection_reads_only_visible_counts_and_streams_full_csv() {
     raw.extend(crc32fast::hash(&raw).to_le_bytes());
     fs::write(dir.join("reference.csv"), table).unwrap();
     fs::write(dir.join("vector.eab"), raw).unwrap();
+    // g001 has signal only beyond the first 25-dataset page. Global zero-row
+    // filtering must keep it; sample_026 also breaks otherwise identical totals.
+    let mut alternate = fs::read(dir.join("vector.eab")).unwrap();
+    alternate[104] = 0xe5;
+    let payload_end = alternate.len() - 4;
+    let checksum = crc32fast::hash(&alternate[..payload_end]);
+    alternate[payload_end..].copy_from_slice(&checksum.to_le_bytes());
+    fs::write(dir.join("alternate.eab"), alternate).unwrap();
     let manifest = json!({"format":"compact","compact_format_version":1,"level":"gene","reference":{"file":"reference.csv","sha256":hex,"targets":300},
-        "datasets":(1..=150).map(|i|json!({"name":format!("sample_{i:03}"),"output":"vector.eab"})).collect::<Vec<_>>(),"global":{"output":"vector.eab"},"coverage":{"complete":true}});
+        "datasets":(1..=150).map(|i|json!({"name":format!("sample_{i:03}"),"output":if i==26 {"alternate.eab"} else {"vector.eab"}})).collect::<Vec<_>>(),"global":{"output":"vector.eab"},"coverage":{"complete":true}});
     fs::write(
         dir.join("manifest.json"),
         serde_json::to_vec(&manifest).unwrap(),
@@ -236,4 +246,111 @@ fn large_selection_reads_only_visible_counts_and_streams_full_csv() {
     assert!(csv.contains("\"300\",\"g300\",\"sample_150\",\"18446744073709551615\""));
     browser.click("#clear-export");
     browser.wait("return document.getElementById('clear-export').hidden");
+
+    // Pure display helpers exercise exact rounding at suffix boundaries and
+    // preserve full u64 counts. Changing formatting must not query more blocks.
+    assert_eq!(
+        browser.js("return import('./display.js').then(({formatAbundance:f})=>[f(999499n,'raw','human'),f(999500n,'raw','human'),f(1234567n,'raw','human'),f(1234567890n,'raw','human'),f(1234567890000n,'raw','human'),f(18446744073709551615n,'raw','scientific'),f(1n,'raw','scientific'),f(0n,'raw','scientific'),f(999n,'log','full')])"),
+        json!(["999K","1.00M","1.23M","1.23G","1.23T","1.84e+19","1.00e+0","0.00e+0","3.00"])
+    );
+    let before = browser.js("return window.queries.length");
+    browser.js("document.getElementById('number-format').value='scientific';document.getElementById('number-format').dispatchEvent(new Event('change'))");
+    assert!(browser.js("return Array.from(document.querySelectorAll('#heatmap td')).some(cell=>cell.textContent==='1.84e+19')")==true);
+    browser.js("document.getElementById('value-mode').value='log';document.getElementById('value-mode').dispatchEvent(new Event('change'))");
+    assert!(browser.js("return Array.from(document.querySelectorAll('#heatmap td')).some(cell=>cell.textContent==='1.93e+1' && cell.title.includes('18446744073709551615'))")==true);
+    assert_eq!(browser.js("return window.queries.length"), before);
+
+    browser.js("document.getElementById('value-mode').value='raw';document.getElementById('hide-empty').checked=true;document.getElementById('row-sort').value='total-desc';document.getElementById('column-sort').value='total-desc'");
+    browser.click("#draw");
+    browser.wait("return !document.getElementById('download').disabled");
+    assert!(
+        browser
+            .js("return document.getElementById('view-title').textContent")
+            .as_str()
+            .unwrap()
+            .contains("226 genes × 151 datasets")
+    );
+    assert!(
+        browser
+            .js("return document.getElementById('view-details').textContent")
+            .as_str()
+            .unwrap()
+            .contains("74 all-zero rows hidden")
+    );
+    assert!(
+        browser
+            .js("return document.querySelector('#heatmap td').title")
+            .as_str()
+            .unwrap()
+            .starts_with("g004 / sample_026: 18446744073709551615")
+    );
+    assert_eq!(
+        browser.js("return window.queries.slice(-25).every(q=>q.targets===100)"),
+        true
+    );
+
+    // Changing name ordering reuses the summaries: only the visible page reloads.
+    let before = browser.js("return window.queries.length").as_u64().unwrap();
+    browser.js("document.getElementById('row-sort').value='name-asc';document.getElementById('row-sort').dispatchEvent(new Event('change'))");
+    browser.click("#apply-view");
+    browser.wait("return !document.getElementById('download').disabled");
+    assert_eq!(
+        browser.js("return window.queries.length").as_u64().unwrap() - before,
+        25
+    );
+    assert!(
+        browser
+            .js("return document.querySelector('#heatmap td').title")
+            .as_str()
+            .unwrap()
+            .starts_with("g001 / sample_026: 1")
+    );
+
+    browser.js("window.exportBlob=null");
+    browser.click("#download");
+    browser.wait("return window.exportBlob!==null");
+    let visible = webdriver(
+        "POST",
+        &format!("{}/execute/async", browser.path),
+        json!({"script":"const done=arguments[arguments.length-1];window.exportBlob.text().then(done)","args":[]}),
+    );
+    assert!(
+        visible.as_str().unwrap().contains("18446744073709551615"),
+        "scientific display must export original decoded integers"
+    );
+    assert!(!visible.as_str().unwrap().contains("1.84e+19"));
+
+    // Streamed full exports follow filtering and ordering without a full matrix.
+    browser.js("window.exportBlob=null");
+    browser.click("#export-selection");
+    browser.wait(
+        "return !document.getElementById('export-selection').disabled && window.exportBlob!==null",
+    );
+    let filtered = webdriver(
+        "POST",
+        &format!("{}/execute/async", browser.path),
+        json!({"script":"const done=arguments[arguments.length-1];window.exportBlob.text().then(done)","args":[]}),
+    );
+    let filtered = filtered.as_str().unwrap();
+    assert_eq!(filtered.lines().count(), 226 * 151 + 1);
+    assert!(filtered.contains("\"1\",\"g001\",\"sample_026\",\"1\""));
+    assert!(!filtered.contains("\"g005\""));
+    browser.click("#clear-export");
+    browser.wait("return document.getElementById('clear-export').hidden");
+
+    // Cancellation stops a new requested scan rather than silently publishing it.
+    browser.click("#clear");
+    browser.click("#select-targets");
+    browser.click("#select-datasets");
+    browser.click("#draw");
+    browser.click("#cancel");
+    browser.wait("return document.getElementById('cancel').hidden");
+    assert_eq!(
+        browser.js("return document.getElementById('heatmap').hidden"),
+        true
+    );
+    assert_eq!(
+        browser.js("return document.getElementById('download').disabled"),
+        true
+    );
 }
