@@ -1,5 +1,5 @@
 //! Strand-oriented exon extraction from GTF coordinates and genomic FASTA.
-use crate::{input, output};
+use crate::{input, junctions, output};
 use anyhow::{Context, Result, bail, ensure};
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
@@ -9,16 +9,52 @@ use std::{
 };
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct Locus {
-    start: usize,
-    end: usize,
-    strand: u8,
+pub(crate) struct Locus {
+    pub start: usize,
+    pub end: usize,
+    pub strand: u8,
+}
+
+// Inclusive coordinates, for one contig and strand. A shared base is an
+// intersection; adjacent intervals with no shared base remain separate.
+pub(crate) fn merge_overlapping(mut intervals: Vec<Locus>) -> Vec<Locus> {
+    intervals.sort_unstable();
+    let mut merged: Vec<Locus> = Vec::new();
+    for locus in intervals {
+        if let Some(last) = merged.last_mut()
+            && locus.start <= last.end
+        {
+            last.end = last.end.max(locus.end);
+        } else {
+            merged.push(locus);
+        }
+    }
+    merged
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Locus, merge_overlapping};
+
+    #[test]
+    fn intersecting_exons_merge_transitively_but_adjacent_exons_stay_separate() {
+        for strand in *b"+-" {
+            let loci = [(10, 15), (1, 5), (5, 9), (9, 10), (16, 20), (3, 4)]
+                .map(|(start, end)| Locus { start, end, strand });
+            let merged: Vec<_> = merge_overlapping(loci.to_vec())
+                .into_iter()
+                .map(|locus| (locus.start, locus.end, locus.strand))
+                .collect();
+            assert_eq!(merged, vec![(1, 15, strand), (16, 20, strand)]);
+        }
+    }
 }
 
 #[derive(Default)]
 struct Names {
     exons: BTreeSet<String>,
     genes: BTreeSet<String>,
+    transcripts: BTreeSet<String>,
 }
 
 type Annotation = BTreeMap<String, BTreeMap<Locus, Names>>;
@@ -80,13 +116,21 @@ fn attributes(mut text: &str) -> Result<Names> {
             "gene_id" => {
                 names.genes.insert(value);
             }
+            "transcript_id" => {
+                names.transcripts.insert(value);
+            }
             _ => {}
         }
     }
     Ok(names)
 }
 
-fn annotation(path: &Path, require_genes: bool) -> Result<Annotation> {
+fn annotation(
+    path: &Path,
+    require_genes: bool,
+    junctions: &mut junctions::Annotation,
+    junction_mode: junctions::Mode,
+) -> Result<Annotation> {
     let mut annotation: Annotation = BTreeMap::new();
     let mut reader = BufReader::new(output::reader(path)?);
     let mut line = String::new();
@@ -130,6 +174,18 @@ fn annotation(path: &Path, require_genes: bool) -> Result<Annotation> {
                 !require_genes || !names.genes.is_empty(),
                 "gene quantification requires gene_id on every exon"
             );
+            if junction_mode != junctions::Mode::None {
+                ensure!(
+                    names.genes.len() == 1 && names.transcripts.len() == 1,
+                    "junction indexing requires exactly one gene_id and transcript_id on every exon"
+                );
+                junctions.add(
+                    contig,
+                    names.genes.first().unwrap(),
+                    names.transcripts.first().unwrap(),
+                    locus,
+                )?;
+            }
             let entry = annotation
                 .entry(contig.to_string())
                 .or_default()
@@ -152,7 +208,7 @@ fn annotation(path: &Path, require_genes: bool) -> Result<Annotation> {
     Ok(annotation)
 }
 
-fn complement(base: u8) -> Result<u8> {
+pub(crate) fn complement(base: u8) -> Result<u8> {
     Ok(match base.to_ascii_uppercase() {
         b'A' => b'T',
         b'C' => b'G',
@@ -174,7 +230,7 @@ fn complement(base: u8) -> Result<u8> {
 }
 
 // Escape header separators, whitespace, and non-ASCII bytes unambiguously.
-fn header_value(value: &str) -> String {
+pub(crate) fn header_value(value: &str) -> String {
     let mut out = String::new();
     for b in value.bytes() {
         if b.is_ascii_alphanumeric() || b"._-".contains(&b) {
@@ -214,16 +270,27 @@ pub fn extract(
     destination: &Path,
     compression: output::Compression,
 ) -> Result<()> {
-    extract_level(gtf, genomes, destination, compression, crate::Level::Exon)
+    extract_reference(
+        gtf,
+        genomes,
+        destination,
+        compression,
+        crate::Level::Exon,
+        31,
+        &junctions::Options::default(),
+    )?;
+    Ok(())
 }
 
-pub fn extract_level(
+pub fn extract_reference(
     gtf: &Path,
     genomes: &[PathBuf],
     destination: &Path,
     compression: output::Compression,
     level: crate::Level,
-) -> Result<()> {
+    k: usize,
+    junction_options: &junctions::Options,
+) -> Result<junctions::Stats> {
     ensure!(
         !genomes.is_empty(),
         "provide at least one reference genome FASTA"
@@ -233,7 +300,16 @@ pub fn extract_level(
         "output already exists: {}",
         destination.display()
     );
-    let mut annotation = annotation(gtf, level == crate::Level::Gene)?;
+    junction_options.validate(level, true)?;
+    let mut junction_annotation = junctions::Annotation::default();
+    let mut annotation = annotation(
+        gtf,
+        level == crate::Level::Gene,
+        &mut junction_annotation,
+        junction_options.junctions,
+    )?;
+    let mut junction_contigs = junction_annotation.into_contigs();
+    let mut junction_stats = junctions::Stats::default();
     if level == crate::Level::Gene {
         // Group and merge overlapping exonic intervals, never separated exons.
         for loci in annotation.values_mut() {
@@ -252,17 +328,7 @@ pub fn extract_level(
             }
             loci.clear();
             for ((gene, _), intervals) in genes {
-                let mut merged: Vec<Locus> = Vec::new();
-                for locus in intervals {
-                    if let Some(last) = merged.last_mut()
-                        && locus.start <= last.end
-                    {
-                        last.end = last.end.max(locus.end);
-                    } else {
-                        merged.push(locus);
-                    }
-                }
-                for locus in merged {
+                for locus in merge_overlapping(intervals) {
                     loci.entry(locus).or_default().genes.insert(gene.clone());
                 }
             }
@@ -348,6 +414,17 @@ pub fn extract_level(
                         writeln!(out)?;
                     }
                 }
+                if let Some(genes) = junction_contigs.remove(contig) {
+                    junctions::write_contig(
+                        &genes,
+                        bases,
+                        k,
+                        junction_options,
+                        out,
+                        &mut junction_stats,
+                    )
+                    .with_context(|| format!("junctions on {contig}"))?;
+                }
                 Ok(())
             })?;
         }
@@ -367,5 +444,15 @@ pub fn extract_level(
         .persist_noclobber(destination)
         .with_context(|| format!("publishing {}", destination.display()))?;
     eprintln!("Extracted {count} exons: {}", destination.display());
-    Ok(())
+    if junction_options.junctions != junctions::Mode::None {
+        eprintln!(
+            "Junctions: {} annotated boundaries, {} additional ordered pairs, {} sequence records; {} genes expanded, {} above exon limit",
+            junction_stats.annotated_junctions,
+            junction_stats.additional_pairs,
+            junction_stats.sequence_records,
+            junction_stats.expanded_genes,
+            junction_stats.genes_above_limit,
+        );
+    }
+    Ok(junction_stats)
 }

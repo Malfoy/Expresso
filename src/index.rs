@@ -33,6 +33,8 @@ pub struct Metadata {
     pub duplicate_kmers: usize,
     #[serde(default)]
     pub level: crate::Level,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub junctions: Option<crate::junctions::Metadata>,
     pub exons: Vec<Exon>,
 }
 
@@ -221,6 +223,7 @@ pub fn build(args: &BuildArgs) -> Result<()> {
         "threads and memory-gb must be positive"
     );
     let m = args.minimizer.unwrap_or(19.min(args.k.saturating_sub(2)));
+    args.junctions.validate(args.level, args.gtf.is_some())?;
     let mut config = BuildConfiguration::new(args.k, m).map_err(anyhow::Error::msg)?;
     let stage = staging(&args.index)?;
     let scratch = if let Some(dir) = &args.temp_dir {
@@ -238,14 +241,25 @@ pub fn build(args: &BuildArgs) -> Result<()> {
     } else {
         "reference-exons.fa"
     });
+    let mut junction_metadata = None;
     let reference = if let Some(gtf) = &args.gtf {
-        crate::exons::extract_level(
+        let stats = crate::exons::extract_reference(
             gtf,
             &args.genome,
             &generated,
             crate::output::Compression::None,
             args.level,
+            args.k,
+            &args.junctions,
         )?;
+        if args.junctions.junctions != crate::junctions::Mode::None {
+            junction_metadata = Some(crate::junctions::Metadata {
+                mode: args.junctions.junctions,
+                max_exons: args.junctions.junction_max_exons,
+                exon_counting: crate::junctions::ExonCounting::MergedOverlaps,
+                stats,
+            });
+        }
         &generated
     } else {
         args.exons
@@ -275,10 +289,17 @@ pub fn build(args: &BuildArgs) -> Result<()> {
                 unique_kmers: 0,
             });
         }
-        exons[id - 1].length = exons[id - 1]
-            .length
-            .checked_add(seq.len())
-            .context("target length overflow")?;
+        // Junction contexts are additional evidence, not extra exonic reference length.
+        let is_junction = args.gtf.is_some()
+            && header
+                .split(|b| b.is_ascii_whitespace())
+                .any(|field| field == b"kind=junction");
+        if !is_junction {
+            exons[id - 1].length = exons[id - 1]
+                .length
+                .checked_add(seq.len())
+                .context("target length overflow")?;
+        }
         // Explicit splitting ensures GGCAT cannot bridge an ambiguous base.
         for run in seq
             .split(|b| !input::is_dna(*b))
@@ -388,6 +409,7 @@ pub fn build(args: &BuildArgs) -> Result<()> {
     owners.write(&stage.path().join("owners.bin"))?;
     let meta = Metadata {
         level: args.level,
+        junctions: junction_metadata,
         format_version: FORMAT_VERSION,
         expresso_version: env!("CARGO_PKG_VERSION").to_string(),
         sshash_version: "0.7.1".into(),

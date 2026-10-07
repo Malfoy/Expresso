@@ -5,6 +5,7 @@ mod exons;
 mod export;
 mod index;
 mod input;
+mod junctions;
 mod output;
 mod portable;
 mod quantify;
@@ -100,6 +101,8 @@ pub struct BuildArgs {
     /// Reference genome FASTA; repeat for multiple files. Used with --gtf.
     #[arg(long, visible_alias = "reference", requires = "gtf")]
     genome: Vec<PathBuf>,
+    #[command(flatten)]
+    junctions: junctions::Options,
     /// New index directory. Existing paths are never overwritten.
     #[arg(short, long)]
     index: PathBuf,
