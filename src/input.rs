@@ -1,7 +1,7 @@
 use crate::abundance::{self, Mode};
 use anyhow::{Context, Result, bail, ensure};
 use crossbeam_channel::{Receiver, Sender, bounded};
-use helicase::{Config, FastxParser, HelicaseParser, ParserOptions, input::*};
+use helicase::{Config, FastxParser, HelicaseParser, ParserOptions};
 use serde::Serialize;
 use std::{
     collections::HashSet,
@@ -13,8 +13,8 @@ use std::{
 const CONFIG: Config = ParserOptions::default().compute_quality().config();
 
 pub fn records(path: &Path, mut visit: impl FnMut(&[u8], &[u8]) -> Result<()>) -> Result<()> {
-    // Helicase currently panics on decoder errors. Convert them into a failed run
-    // with the source path; never publish partial results as a successful dataset.
+    // Propagate parser/decoder errors and guard unexpected upstream panics;
+    // never publish partial results as a successful dataset.
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
         let mut file = BufReader::new(File::open(path)?);
         // SSHash's needletail and Helicase's optional xz feature require
@@ -25,18 +25,14 @@ pub fn records(path: &Path, mut visit: impl FnMut(&[u8], &[u8]) -> Result<()>) -
         } else {
             Box::new(file)
         };
-        let mut input = ReaderInput::new(reader);
-        if input.first_byte() == 0 && input.next().is_none() {
-            return Ok(());
-        }
-        let mut parser = FastxParser::<CONFIG>::from_input(input)?;
+        let mut parser = FastxParser::<CONFIG>::from_reader(reader)?;
         let mut cleaned = Vec::new();
-        while parser.next().is_some() {
+        while let Some(event) = parser.next() {
+            event?;
             let header = parser.get_header().trim_ascii();
             let seq = parser.get_dna_string();
-            // Helicase's string path retains CR bytes (and adjoining line
-            // breaks) on CRLF-wrapped FASTA. Remove formatting whitespace
-            // before identifying ambiguous bases or computing KC denominators.
+            // Normalize formatting whitespace before identifying ambiguous
+            // bases or computing KC denominators.
             if seq.iter().any(u8::is_ascii_whitespace) {
                 cleaned.clear();
                 cleaned.extend(seq.iter().copied().filter(|b| !b.is_ascii_whitespace()));
@@ -317,6 +313,93 @@ fn basename(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+
+    fn encode(data: &[u8], codec: &str) -> Vec<u8> {
+        match codec {
+            "none" => data.to_vec(),
+            "gz" => {
+                let mut encoder =
+                    flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+                encoder.write_all(data).unwrap();
+                encoder.finish().unwrap()
+            }
+            "xz" => {
+                let mut encoder = xz2::write::XzEncoder::new(Vec::new(), 1);
+                encoder.write_all(data).unwrap();
+                encoder.finish().unwrap()
+            }
+            "zstd" => zstd::stream::encode_all(data, 1).unwrap(),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn fastx_compression_and_concatenated_streams() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("input.data"); // Detect compression by magic, not suffix.
+        for data in [
+            b">one km:f:2\r\nACGT\r\nNacg\r\n>two\r\nTGCA\r\n".as_slice(),
+            b"@one km:f:2\r\nACGTNacg\r\n+\r\nIIIIIIII\r\n@two\r\nTGCA\r\n+\r\nJJJJ\r\n".as_slice(),
+        ] {
+            for codec in ["none", "gz", "xz", "zstd"] {
+                for concatenated in [false, true] {
+                    let encoded = if concatenated {
+                        // Split inside a record: the parser must see one continuous stream.
+                        let split = data.len() / 2;
+                        [encode(&data[..split], codec), encode(&data[split..], codec)].concat()
+                    } else {
+                        encode(data, codec)
+                    };
+                    std::fs::write(&path, encoded).unwrap();
+                    let mut found = Vec::new();
+                    records(&path, |h, s| {
+                        found.push((h.to_vec(), s.to_vec()));
+                        Ok(())
+                    })
+                    .unwrap_or_else(|error| {
+                        panic!("{codec}, concatenated={concatenated}: {error:#}")
+                    });
+                    assert_eq!(
+                        found,
+                        vec![
+                            (b"one km:f:2".to_vec(), b"ACGTNacg".to_vec()),
+                            (b"two".to_vec(), b"TGCA".to_vec()),
+                        ],
+                        "{codec}, concatenated={concatenated}"
+                    );
+                }
+            }
+        }
+        for codec in ["none", "gz", "xz", "zstd"] {
+            std::fs::write(&path, encode(b"", codec)).unwrap();
+            records(&path, |_, _| panic!("empty {codec} yielded a record")).unwrap();
+        }
+    }
+
+    #[test]
+    fn malformed_and_truncated_inputs_are_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.data");
+        for data in [
+            b"not a FASTA or FASTQ file\n".as_slice(),
+            b"@read\nACGT\n+\nIII\n".as_slice(),
+            b"@read\nACGT\n+\n".as_slice(),
+        ] {
+            std::fs::write(&path, data).unwrap();
+            let error = records(&path, |_, _| Ok(()))
+                .expect_err(&format!("accepted malformed input: {data:?}"));
+            assert!(format!("{error:#}").contains("bad.data"));
+        }
+        for codec in ["gz", "xz", "zstd"] {
+            let mut data = encode(b">valid\nACGTTGCAACGTTGCA\n", codec);
+            data.truncate(data.len() - 5);
+            std::fs::write(&path, data).unwrap();
+            let error = records(&path, |_, _| Ok(())).expect_err(codec);
+            assert!(format!("{error:#}").contains("bad.data"));
+        }
+    }
+
     #[test]
     fn wrapped_crlf_records() {
         let dir = tempfile::tempdir().unwrap();

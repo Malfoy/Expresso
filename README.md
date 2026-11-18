@@ -30,7 +30,7 @@ flowchart LR
 
 ## Installation
 
-Requirements: **Rust 1.88+**, a C/C++ toolchain, and `pkg-config`.
+Requirements: **Rust 1.89+**, a C/C++ toolchain, and `pkg-config`.
 **GGCAT is built into EXPRESSO** as a Rust dependency and installed automatically
 with it; no separate GGCAT installation is required.
 
@@ -726,7 +726,7 @@ scripts are needed to run the tests.
 - [REINDEER2](https://github.com/Yohan-HernandezCourbevoie/REINDEER2) — logarithmic abundance discretization inspiration.
 
 `Cargo.lock` pins dependency versions. GGCAT 2.1.0 is pinned to an upstream Git
-revision and compiled into EXPRESSO; SSHash 0.7.1 and Helicase 0.2.0 are also
+revision and compiled into EXPRESSO; SSHash 0.7.1 and Helicase 1.3.0 are also
 pinned explicitly in `Cargo.toml`. EXPRESSO handles xz through its shared liblzma
 dependency before passing the stream to Helicase; gzip/zstd use Helicase's input
 layer. EAB is EXPRESSO's own format and is not REINDEER2-compatible.

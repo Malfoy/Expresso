@@ -2,7 +2,7 @@
 name = "expresso"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 description = "EXPRESSO — EXon-level RNA EXPRESsion quantificatiOn"
 
 [dependencies]
@@ -13,7 +13,7 @@ crc32fast = "1"
 csv = "1"
 flate2 = "1"
 ggcat-api = { git = "https://github.com/algbio/ggcat", rev = "30045581666e001d9071886674e88e52e55769ac", default-features = false, features = ["hash-16bit", "hash-32bit", "hash-64bit", "hash-128bit"] }
-helicase = "=0.2.0"
+helicase = "=1.3.0"
 rayon = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
