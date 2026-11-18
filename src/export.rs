@@ -58,16 +58,27 @@ pub(crate) fn load(path: &Path) -> Result<Results> {
     let labels = level.columns();
     let reference_path = source(&input, text(&manifest["reference"], "file")?)?;
     let mut reader = csv::Reader::from_reader(output::reader(&reference_path)?);
+    let has_lengths = reader.headers()?.get(4) == Some("kmer_length");
+    let mut columns = vec![labels[0], labels[1], "length", "unique_kmers"];
+    if has_lengths {
+        columns.push("kmer_length");
+    }
     ensure!(
-        reader
-            .headers()?
-            .iter()
-            .eq([labels[0], labels[1], "length", "unique_kmers"]),
+        reader.headers()?.iter().eq(columns),
         "Invalid reference table columns"
     );
     let mut exons = Vec::new();
-    for row in reader.deserialize::<(usize, String, usize, u64)>() {
-        let (id, name, length, unique_kmers) = row?;
+    for row in reader.records() {
+        let row = row?;
+        let id: usize = row[0].parse()?;
+        let name = row[1].to_owned();
+        let length = row[2].parse()?;
+        let unique_kmers = row[3].parse()?;
+        let kmer_length = row
+            .get(4)
+            .filter(|s| !s.is_empty())
+            .map(str::parse)
+            .transpose()?;
         ensure!(
             id == exons.len() + 1,
             "Reference IDs must be consecutive and 1-based"
@@ -76,6 +87,7 @@ pub(crate) fn load(path: &Path) -> Result<Results> {
             name,
             length,
             unique_kmers,
+            kmer_length,
         });
     }
     let reference = compact::reference_id(&exons);
@@ -185,6 +197,16 @@ pub fn run(args: &ExportArgs) -> Result<()> {
             true,
         ));
     }
+    // Validate availability even if raw count bounds would exclude every row.
+    if matches!(
+        args.normalization,
+        crate::normalization::Mode::Coverage | crate::normalization::Mode::LengthCpm
+    ) {
+        for &i in &selected {
+            args.normalization
+                .apply(0, exons[i].kmer_length, Some(0.0))?;
+        }
+    }
     let stage = index::staging(&args.output)?;
     fs::create_dir(stage.path().join("datasets"))?;
     let reference_file = format!("{}.zst", level.table());
@@ -192,10 +214,16 @@ pub fn run(args: &ExportArgs) -> Result<()> {
         &stage.path().join(&reference_file),
         output::Compression::Zstd,
         |csv| {
-            csv.write_record([labels[0], labels[1], "length", "unique_kmers"])?;
+            csv.write_record([
+                labels[0],
+                labels[1],
+                "length",
+                "unique_kmers",
+                "kmer_length",
+            ])?;
             for &i in &selected {
                 let e = &exons[i];
-                csv.serialize((i + 1, &e.name, e.length, e.unique_kmers))?;
+                csv.serialize((i + 1, &e.name, e.length, e.unique_kmers, e.kmer_length))?;
             }
             Ok(())
         },
@@ -209,8 +237,12 @@ pub fn run(args: &ExportArgs) -> Result<()> {
             .try_for_each(|(entry, output_name, global)| -> Result<()> {
                 let values =
                     crate::eab::decode(vector_reader(&input, entry)?, exons.len(), &reference)?;
+                let total = args.normalization.dataset_total(entry)?;
                 let mut statistics = Vec::new();
-                if *global && let Some(columns) = entry["statistics"].as_array() {
+                if *global
+                    && args.normalization == crate::normalization::Mode::None
+                    && let Some(columns) = entry["statistics"].as_array()
+                {
                     let mut names = HashSet::new();
                     for column in columns {
                         let name = text(column, "name")?;
@@ -243,6 +275,18 @@ pub fn run(args: &ExportArgs) -> Result<()> {
                             continue;
                         }
                         if statistics.is_empty() {
+                            if args.normalization != crate::normalization::Mode::None {
+                                let value =
+                                    args.normalization
+                                        .apply(value, exons[i].kmer_length, total)?;
+                                let mut row = Vec::new();
+                                if with_names {
+                                    row.extend([(i + 1).to_string(), exons[i].name.clone()]);
+                                }
+                                row.push(value.to_string());
+                                csv.write_record(row)?;
+                                continue;
+                            }
                             if with_names {
                                 csv.serialize((i + 1, &exons[i].name, value))?;
                             } else {
@@ -265,6 +309,8 @@ pub fn run(args: &ExportArgs) -> Result<()> {
     let report = serde_json::json!({
         "source":input, "source_format":"EAB v1", "format":"csv", "approximate":true,
         "level":level, "with_names":with_names,
+        "normalization":args.normalization,
+        "normalization_semantics":"cpm = count * 1e6 / full weighted valid dataset k-mers; coverage = count / valid exonic reference k-mer positions; length-cpm = cpm / k-mer length. Global uses the pooled dataset total. Normalized export omits raw summary statistics. Value bounds apply to decoded raw counts.",
         "filters":{"targets_selected":selected.len(), "min_value":args.min_value,"max_value":args.max_value},
         "reference":{"file":reference_file,"source_sha256":compact::hex(&reference),"targets":selected.len(), "ids":"original 1-based IDs; may be nonconsecutive"},
         "compression":args.compression, "statistics":manifest["statistics"],

@@ -16,7 +16,7 @@ pub enum Mode {
     All,
 }
 
-#[derive(clap::Args)]
+#[derive(clap::Args, Clone)]
 pub struct Options {
     /// Gene/GTF mode only: no junctions, annotated transcript junctions, or all ordered exon pairs.
     #[arg(long, value_enum, default_value = "none")]

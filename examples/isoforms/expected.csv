@@ -1,0 +1,3 @@
+transcript_name,abundance,within_gene_fraction
+T_WITH_B,6,0.6
+T_SKIP_B,4,0.4

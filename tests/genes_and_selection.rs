@@ -126,6 +126,63 @@ fn genes_use_union_ownership_and_never_bridge_separated_exons() {
         }
     }
     assert!(expected.values().all(|v| *v > 0));
+    let meta: serde_json::Value =
+        serde_json::from_slice(&fs::read(dir.join("idx/metadata.json")).unwrap()).unwrap();
+    for target in meta["exons"].as_array().unwrap() {
+        assert_eq!(
+            target["kmer_length"], 14,
+            "sum lengths of disconnected runs, without artificial joins"
+        );
+    }
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(dir.join("results/manifest.json")).unwrap()).unwrap();
+    assert_eq!(
+        manifest["datasets"][0]["total_kmers"],
+        serde_json::json!({"numerator":"47","scale":1})
+    );
+    assert_eq!(
+        manifest["global"]["total_kmers"],
+        serde_json::json!({"numerator":"94000000","scale":1_000_000})
+    );
+    for (source, destination) in [
+        ("results", "normalized-dir"),
+        ("results/abundance.eai", "normalized-eai"),
+    ] {
+        success(
+            dir,
+            &[
+                "export",
+                "--input",
+                source,
+                "--output",
+                destination,
+                "--normalization",
+                "length-cpm",
+                "--target",
+                "g1",
+                "--compression",
+                "none",
+            ],
+        );
+        let mut reader =
+            csv::Reader::from_path(dir.join(destination).join("datasets/A.csv")).unwrap();
+        assert_eq!(reader.headers().unwrap().len(), 3);
+        let row = reader.records().next().unwrap().unwrap();
+        let normalized = row[2].parse::<f64>().unwrap();
+        assert!(
+            (normalized - expected["g1"] as f64 / 14.0 / 47.0 * 1e6).abs() < 1e-8,
+            "full input denominator includes unmatched and shared kmers despite selecting only one gene"
+        );
+        let mut global = csv::Reader::from_path(dir.join(destination).join("global.csv")).unwrap();
+        assert_eq!(
+            global.headers().unwrap().len(),
+            3,
+            "do not label raw summary statistics as normalized"
+        );
+        let row = global.records().next().unwrap().unwrap();
+        assert!((row[2].parse::<f64>().unwrap() - normalized).abs() < 1e-8);
+    }
+
     success(
         dir,
         &[

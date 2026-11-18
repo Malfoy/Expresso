@@ -51,17 +51,17 @@ mod tests {
 }
 
 #[derive(Default)]
-struct Names {
-    exons: BTreeSet<String>,
-    genes: BTreeSet<String>,
-    transcripts: BTreeSet<String>,
+pub(crate) struct Names {
+    pub exons: BTreeSet<String>,
+    pub genes: BTreeSet<String>,
+    pub transcripts: BTreeSet<String>,
 }
 
 type Annotation = BTreeMap<String, BTreeMap<Locus, Names>>;
 
 // Parse quoted GTF values without treating semicolons inside quotes as separators.
 // Repeated optional attributes (e.g. tag) are permitted. IDs are optional.
-fn attributes(mut text: &str) -> Result<Names> {
+pub(crate) fn attributes(mut text: &str) -> Result<Names> {
     let mut names = Names::default();
     if text.trim() == "." {
         return Ok(names);
@@ -243,7 +243,7 @@ pub(crate) fn header_value(value: &str) -> String {
     out
 }
 
-fn require_fasta(path: &Path) -> Result<()> {
+pub(crate) fn require_fasta(path: &Path) -> Result<()> {
     let mut reader = BufReader::new(output::reader(path)?);
     let mut line = String::new();
     loop {

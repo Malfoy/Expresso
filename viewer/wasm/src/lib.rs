@@ -1,6 +1,8 @@
 //! Small raw WebAssembly ABI; no JavaScript build tool or bindings generator.
 #[path = "../../../src/eab.rs"]
 pub mod eab;
+#[path = "../../../src/efv.rs"]
+pub mod efv;
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 use std::io::Read;
@@ -10,9 +12,16 @@ struct Request {
     targets: usize,
     reference: String,
     selected: Vec<usize>,
+    #[serde(default)]
+    encoding: Option<String>,
 }
 
-fn prepare(request: &[u8], vector: &[u8]) -> Result<eab::PackedVector> {
+pub enum PackedVector {
+    Counts(eab::PackedVector),
+    Float(efv::FloatVector),
+}
+
+fn prepare(request: &[u8], vector: &[u8]) -> Result<PackedVector> {
     let request: Request = serde_json::from_slice(request)?;
     ensure!(
         request.targets <= 100_000_000,
@@ -30,26 +39,49 @@ fn prepare(request: &[u8], vector: &[u8]) -> Result<eab::PackedVector> {
         request.selected.iter().all(|i| *i < request.targets),
         "Target ID out of range"
     );
+    ensure!(
+        request
+            .encoding
+            .as_deref()
+            .is_none_or(|v| ["eab", "efv"].contains(&v)),
+        "invalid vector encoding"
+    );
+    let floating = request.encoding.as_deref() == Some("efv");
     let limit = (request.targets as u64)
-        .checked_mul(2)
+        .checked_mul(if floating { 8 } else { 2 })
         .and_then(|n| n.checked_add(524_364))
         .context("Vector too large")?;
     let decoder = ruzstd::decoding::StreamingDecoder::new(vector)?;
-    eab::PackedVector::read(decoder.take(limit + 1), request.targets, &reference)
+    if floating {
+        Ok(PackedVector::Float(efv::FloatVector::read(
+            decoder.take(limit + 1),
+            request.targets,
+            &reference,
+        )?))
+    } else {
+        Ok(PackedVector::Counts(eab::PackedVector::read(
+            decoder.take(limit + 1),
+            request.targets,
+            &reference,
+        )?))
+    }
 }
 
-fn select(request: &[u8], vector: &eab::PackedVector) -> Result<Vec<String>> {
+fn select(request: &[u8], vector: &PackedVector) -> Result<Vec<Option<String>>> {
     let request: Request = serde_json::from_slice(request)?;
     // Decimal strings preserve the entire u64 range in JavaScript and CSV.
     request
         .selected
         .iter()
-        .map(|i| Ok(vector.get(*i)?.to_string()))
+        .map(|i| match vector {
+            PackedVector::Counts(v) => Ok(Some(v.get(*i)?.to_string())),
+            PackedVector::Float(v) => Ok(v.get(*i)?.map(|v| v.to_string())),
+        })
         .collect()
 }
 
 #[cfg(test)]
-fn decode(request: &[u8], vector: &[u8]) -> Result<Vec<String>> {
+fn decode(request: &[u8], vector: &[u8]) -> Result<Vec<Option<String>>> {
     select(request, &prepare(request, vector)?)
 }
 
@@ -102,7 +134,7 @@ pub unsafe extern "C" fn prepare_vector(
 pub unsafe extern "C" fn select_counts(
     request_ptr: *const u8,
     request_len: usize,
-    handle: *const eab::PackedVector,
+    handle: *const PackedVector,
 ) -> u64 {
     let request = unsafe { std::slice::from_raw_parts(request_ptr, request_len) };
     response(
@@ -113,7 +145,7 @@ pub unsafe extern "C" fn select_counts(
 /// # Safety
 /// handle must be a live PackedVector returned by prepare_vector, released exactly once.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn release_vector(handle: *mut eab::PackedVector) {
+pub unsafe extern "C" fn release_vector(handle: *mut PackedVector) {
     unsafe {
         drop(Box::from_raw(handle));
     }
@@ -121,6 +153,27 @@ pub unsafe extern "C" fn release_vector(handle: *mut eab::PackedVector) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn transcript_toy_metrics_decode_as_floating_values() {
+        let bundle = include_bytes!("../../../examples/isoforms/toy.eai");
+        let offset = u64::from_le_bytes(bundle[8..16].try_into().unwrap()) as usize;
+        let length = u64::from_le_bytes(bundle[16..24].try_into().unwrap()) as usize;
+        let catalogue: serde_json::Value =
+            serde_json::from_slice(&bundle[offset..offset + length]).unwrap();
+        for (metric, expected) in [
+            ("abundance", [4.0, 6.0]),
+            ("assigned_observations", [272.0, 618.0]),
+        ] {
+            let block = &catalogue["datasets"][0]["metrics"][metric];
+            let start = block["offset"].as_u64().unwrap() as usize;
+            let n = block["length"].as_u64().unwrap() as usize;
+            let request=serde_json::to_vec(&serde_json::json!({"targets":2,"reference":catalogue["reference"],"selected":[0,1],"encoding":"efv"})).unwrap();
+            let values = super::decode(&request, &bundle[start..start + n]).unwrap();
+            for (value, expected) in values.into_iter().zip(expected) {
+                assert!((value.unwrap().parse::<f64>().unwrap() - expected).abs() < 1e-4);
+            }
+        }
+    }
     #[test]
     fn selected_counts_preserve_u64_and_non_byte_aligned_codes() {
         let request=br#"{"targets":5,"reference":"e2eddccdd8c0b2effc375a239e518c0717246d9200a7407a836b253718047501","selected":[3,0,1,3,4]}"#;
@@ -134,6 +187,7 @@ mod tests {
                 "18446744073709551615",
                 "1"
             ]
+            .map(|v| Some(v.to_string()))
         );
         let wrong=br#"{"targets":5,"reference":"0000000000000000000000000000000000000000000000000000000000000000","selected":[0]}"#;
         assert!(super::decode(wrong, vector).is_err());

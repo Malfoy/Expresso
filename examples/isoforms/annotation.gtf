@@ -1,0 +1,5 @@
+chr_toy	toy	exon	1	40	.	+	.	gene_id "GENE_SKIP"; transcript_id "T_WITH_B"; exon_id "A";
+chr_toy	toy	exon	51	90	.	+	.	gene_id "GENE_SKIP"; transcript_id "T_WITH_B"; exon_id "B";
+chr_toy	toy	exon	101	140	.	+	.	gene_id "GENE_SKIP"; transcript_id "T_WITH_B"; exon_id "C";
+chr_toy	toy	exon	1	40	.	+	.	gene_id "GENE_SKIP"; transcript_id "T_SKIP_B"; exon_id "A";
+chr_toy	toy	exon	101	140	.	+	.	gene_id "GENE_SKIP"; transcript_id "T_SKIP_B"; exon_id "C";

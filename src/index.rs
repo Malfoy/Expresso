@@ -12,13 +12,17 @@ use std::{
 };
 
 const FORMAT_VERSION: u32 = 1;
-const OWNER_MAGIC: &[u8; 8] = b"EXPRown1";
+pub(crate) const OWNER_MAGIC: &[u8; 8] = b"EXPRown1";
 
 #[derive(Serialize, Deserialize)]
 pub struct Exon {
     pub name: String,
     pub length: usize,
     pub unique_kmers: u64,
+    /// Valid ACGT k-mer positions in exonic sequence, excluding junction contexts.
+    /// Absent in indexes built before normalization support.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kmer_length: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -35,6 +39,8 @@ pub struct Metadata {
     pub level: crate::Level,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub junctions: Option<crate::junctions::Metadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isoforms: Option<crate::isoforms::ModelRef>,
     pub exons: Vec<Exon>,
 }
 
@@ -218,6 +224,9 @@ pub fn publish(stage: tempfile::TempDir, destination: &Path) -> Result<()> {
 }
 
 pub fn build(args: &BuildArgs) -> Result<()> {
+    if args.isoforms {
+        return crate::isoforms::build(args);
+    }
     ensure!(
         args.threads > 0 && args.memory_gb > 0,
         "threads and memory-gb must be positive"
@@ -287,6 +296,7 @@ pub fn build(args: &BuildArgs) -> Result<()> {
                 name,
                 length: 0,
                 unique_kmers: 0,
+                kmer_length: Some(0),
             });
         }
         // Junction contexts are additional evidence, not extra exonic reference length.
@@ -305,6 +315,12 @@ pub fn build(args: &BuildArgs) -> Result<()> {
             .split(|b| !input::is_dna(*b))
             .filter(|s| s.len() >= args.k)
         {
+            if !is_junction {
+                let length = exons[id - 1].kmer_length.as_mut().unwrap();
+                *length = length
+                    .checked_add((run.len() - args.k + 1) as u64)
+                    .context("target k-mer length overflow")?;
+            }
             writeln!(out, ">{id}")?;
             out.write_all(&run.to_ascii_uppercase())?;
             out.write_all(b"\n")?;
@@ -410,6 +426,7 @@ pub fn build(args: &BuildArgs) -> Result<()> {
     let meta = Metadata {
         level: args.level,
         junctions: junction_metadata,
+        isoforms: None,
         format_version: FORMAT_VERSION,
         expresso_version: env!("CARGO_PKG_VERSION").to_string(),
         sshash_version: "0.7.1".into(),

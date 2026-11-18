@@ -14,6 +14,13 @@ pub fn pack(input: &Path, destination: &Path) -> Result<()> {
         "output already exists: {}",
         destination.display()
     );
+    if input.is_dir() {
+        let manifest: serde_json::Value =
+            serde_json::from_reader(crate::output::reader(&input.join("manifest.json"))?)?;
+        if manifest["format"] == "isoform-abundance" {
+            return crate::isoforms::pack(input, destination, &manifest);
+        }
+    }
     let results = export::load(input)?;
     let parent = destination
         .parent()
@@ -66,11 +73,13 @@ pub fn pack(input: &Path, destination: &Path) -> Result<()> {
         encoder.finish()?;
         let length = out.stream_position()? - offset;
         catalogue
-            .push(serde_json::json!({"name":name,"kind":kind,"global":kind == "global","offset":offset,"length":length}));
+            .push(serde_json::json!({"name":name,"kind":kind,"global":kind == "global","offset":offset,"length":length,
+                "total_kmers":entry["total_kmers"]}));
     }
     let offset = out.stream_position()?;
     let catalogue = serde_json::to_vec(&serde_json::json!({
         "version":1,"level":results.level,"reference":compact::hex(&results.reference),
+        "k":results.manifest["k"],
         "targets":results.exons,"datasets":catalogue,"coverage":results.manifest["coverage"],
         "failed_datasets":results.manifest["failed_datasets"],
         "approximate":true,"global_semantics":"sum of exact rounded counts before independent quantization"
@@ -96,6 +105,10 @@ pub(crate) fn load(path: &Path) -> Result<export::Results> {
     let size = file.metadata()?.len();
     let mut header = [0; 24];
     file.read_exact(&mut header)?;
+    ensure!(
+        &header[..8] != b"EXPREAI2",
+        "Transcript EAI v2 is supported by the browser; use its CSV exports or the original inference CSVs"
+    );
     ensure!(&header[..8] == b"EXPREAI1", "Invalid EAI magic/version");
     let offset = u64::from_le_bytes(header[8..16].try_into()?);
     let length = u64::from_le_bytes(header[16..24].try_into()?);
@@ -153,6 +166,7 @@ pub(crate) fn load(path: &Path) -> Result<export::Results> {
     let mut global = global.context("EAI global sum missing")?;
     global["statistics"] = statistics.into();
     let manifest = serde_json::json!({"format":"compact", "compact_format_version":1,"level":level,
+        "k":catalogue["k"],
         "global":global,"datasets":datasets,"coverage":catalogue["coverage"],"failed_datasets":catalogue["failed_datasets"],"statistics":catalogue["global_semantics"]});
     Ok(export::Results {
         input: path.to_owned(),

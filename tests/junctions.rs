@@ -177,6 +177,7 @@ fn gene_junction_indexes_match_independent_transcript_and_pair_oracles() {
         );
         let mut owners: BTreeMap<Vec<u8>, BTreeSet<&str>> = BTreeMap::new();
         let mut lengths = BTreeMap::new();
+        let mut kmer_lengths = BTreeMap::new();
         for gene in &genes {
             let exons: BTreeSet<_> = gene.paths.iter().flatten().copied().collect();
             let mut merged: Vec<Interval> = Vec::new();
@@ -194,6 +195,13 @@ fn gene_junction_indexes_match_independent_transcript_and_pair_oracles() {
                 merged
                     .iter()
                     .map(|&(start, end)| end - start)
+                    .sum::<usize>(),
+            );
+            kmer_lengths.insert(
+                gene.name,
+                merged
+                    .iter()
+                    .map(|&interval| kmers(&transcript(&genome, &[interval], gene.minus)).count())
                     .sum::<usize>(),
             );
             let mut add = |seq: Vec<u8>| {
@@ -240,6 +248,11 @@ fn gene_junction_indexes_match_independent_transcript_and_pair_oracles() {
                 target["length"].as_u64().unwrap() as usize,
                 lengths[name],
                 "junctions must not inflate exonic length"
+            );
+            assert_eq!(
+                target["kmer_length"].as_u64().unwrap() as usize,
+                kmer_lengths[name],
+                "ambiguous runs and microexons shorten the denominator; junctions do not inflate it"
             );
             assert_eq!(
                 target["unique_kmers"].as_u64().unwrap() as usize,

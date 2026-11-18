@@ -1,11 +1,16 @@
 mod abundance;
 mod compact;
 mod eab;
+// The shared floating decoder is used by WASM and native tests; native packaging writes it.
+#[allow(dead_code)]
+mod efv;
 mod exons;
 mod export;
 mod index;
 mod input;
+mod isoforms;
 mod junctions;
+mod normalization;
 mod output;
 mod portable;
 mod quantify;
@@ -59,9 +64,11 @@ enum Command {
     Build(BuildArgs),
     /// Count a file-of-files against a previously built index.
     Quantify(QuantifyArgs),
+    /// Infer isoform abundance from exact exon/intersection feature counts; no sequence input.
+    InferIsoforms(isoforms::InferArgs),
     /// Decode compact abundance vectors into CSVs (one abundance column by default).
     Export(ExportArgs),
-    /// Package compact results into a single indexed file for the WebAssembly viewer.
+    /// Package compact exon/gene results or inferred transcript results for the viewer.
     Pack {
         #[arg(short, long)]
         input: PathBuf,
@@ -87,8 +94,12 @@ enum Command {
     },
 }
 
-#[derive(Args)]
+#[derive(Args, Clone)]
 pub struct BuildArgs {
+    /// Build disjoint exon/intersection features and a GTF isoform exposure model.
+    /// Requires --gtf/--genome; uses original exon intervals, without junction expansion.
+    #[arg(long, requires = "gtf")]
+    isoforms: bool,
     /// Quantification target: exon or gene. Gene FASTA records with the same ID are grouped.
     #[arg(long, value_enum, default_value = "exon")]
     level: Level,
@@ -175,6 +186,9 @@ pub struct QueryOptions {
 
 #[derive(Args)]
 pub struct ExportArgs {
+    /// View-time normalization; stored counts stay raw. Length-cpm divides CPM by target k-mer length.
+    #[arg(long, value_enum, default_value_t = normalization::Mode::None)]
+    normalization: normalization::Mode,
     /// Compact EXPRESSO result directory or packed .eai viewer index.
     #[arg(short, long)]
     input: PathBuf,
@@ -242,10 +256,14 @@ fn main() -> Result<()> {
         }
         Command::Build(args) => index::build(&args),
         Command::Quantify(args) => quantify::run(&args.index, args.threads, &args.query),
+        Command::InferIsoforms(args) => isoforms::infer(&args),
         Command::Export(args) => export::run(&args),
         Command::Pack { input, output } => portable::pack(&input, &output),
         Command::View { port } => viewer::serve(port),
         Command::Run { build, query } => {
+            if build.isoforms {
+                isoforms::validate_query(&query)?;
+            }
             ensure!(
                 !query.viewer_index || query.format == output::Format::Compact,
                 "--viewer-index requires --format compact"

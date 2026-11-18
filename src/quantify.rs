@@ -17,14 +17,16 @@ use std::{
 };
 
 #[derive(Default, Serialize)]
-struct Metrics {
+pub(crate) struct Metrics {
     records: u64,
     valid_kmers: u64,
     assigned_kmers: u64,
+    #[serde(skip)]
+    pub weighted_kmers: u128,
 }
-struct Counts {
-    values: Vec<u64>,
-    metrics: Metrics,
+pub(crate) struct Counts {
+    pub values: Vec<u64>,
+    pub metrics: Metrics,
 }
 
 struct OutputContext<'a> {
@@ -54,6 +56,11 @@ where
     for run in seq.split(|b| !input::is_dna(*b)).filter(|s| s.len() >= K) {
         query.reset();
         add(&mut counts.metrics.valid_kmers, (run.len() - K + 1) as u64)?;
+        counts.metrics.weighted_kmers = counts
+            .metrics
+            .weighted_kmers
+            .checked_add((run.len() - K + 1) as u128 * value as u128)
+            .context("weighted dataset k-mer total overflow")?;
         for window in run.windows(K) {
             let hit = query.lookup(window);
             if hit.is_found()
@@ -67,7 +74,7 @@ where
     Ok(())
 }
 
-fn count<const K: usize>(
+pub(crate) fn count<const K: usize>(
     dataset: &Dataset,
     dict: &Dictionary,
     owners: &Owners,
@@ -141,6 +148,11 @@ where
                 }
                 add(&mut counts.metrics.records, other.metrics.records)?;
                 add(&mut counts.metrics.valid_kmers, other.metrics.valid_kmers)?;
+                counts.metrics.weighted_kmers = counts
+                    .metrics
+                    .weighted_kmers
+                    .checked_add(other.metrics.weighted_kmers)
+                    .context("weighted dataset k-mer total overflow")?;
                 add(
                     &mut counts.metrics.assigned_kmers,
                     other.metrics.assigned_kmers,
@@ -153,6 +165,9 @@ where
 }
 
 pub fn run(index_dir: &Path, threads: usize, options: &QueryOptions) -> Result<()> {
+    if Metadata::load(index_dir)?.isoforms.is_some() {
+        return crate::isoforms::quantify(index_dir, threads, options);
+    }
     ensure!(
         !options.viewer_index || options.format == output::Format::Compact,
         "--viewer-index requires --format compact"
@@ -189,6 +204,7 @@ pub fn run(index_dir: &Path, threads: usize, options: &QueryOptions) -> Result<(
         reference: compact::reference_id(&meta.exons),
     };
     let mut total = vec![0u64; n];
+    let mut total_kmers = 0u128;
     let scratch = tempfile::Builder::new()
         .prefix("counts-")
         .tempdir_in(stage.path())?;
@@ -246,6 +262,17 @@ pub fn run(index_dir: &Path, threads: usize, options: &QueryOptions) -> Result<(
         for (id, result, skip_failed_input) in rx {
             match result {
                 Ok((counts, entry)) => {
+                    total_kmers = total_kmers
+                        .checked_add(
+                            counts
+                                .metrics
+                                .weighted_kmers
+                                .checked_mul(
+                                    (crate::abundance::SCALE / datasets[id].mode.scale()) as u128,
+                                )
+                                .context("global dataset k-mer total overflow")?,
+                        )
+                        .context("global dataset k-mer total overflow")?;
                     for (sum, value) in total.iter_mut().zip(counts.values) {
                         if let Err(error) = add(sum, value) {
                             failure.get_or_insert(error);
@@ -322,7 +349,7 @@ pub fn run(index_dir: &Path, threads: usize, options: &QueryOptions) -> Result<(
             }
         }
     }
-    let global_entry;
+    let mut global_entry;
     let (reference_file, reference_compression);
     let labels = meta.level.columns();
     if options.format == output::Format::Compact {
@@ -405,13 +432,21 @@ pub fn run(index_dir: &Path, threads: usize, options: &QueryOptions) -> Result<(
         &stage.path().join(&reference_file),
         reference_compression,
         |csv| {
-            csv.write_record([labels[0], labels[1], "length", "unique_kmers"])?;
+            csv.write_record([
+                labels[0],
+                labels[1],
+                "length",
+                "unique_kmers",
+                "kmer_length",
+            ])?;
             for (i, e) in meta.exons.iter().enumerate() {
-                csv.serialize((i + 1, &e.name, e.length, e.unique_kmers))?;
+                csv.serialize((i + 1, &e.name, e.length, e.unique_kmers, e.kmer_length))?;
             }
             Ok(())
         },
     )?;
+    global_entry["total_kmers"] =
+        serde_json::json!({"numerator":total_kmers.to_string(),"scale":crate::abundance::SCALE});
     let mut out = BufWriter::new(File::create(stage.path().join("manifest.json"))?);
     serde_json::to_writer_pretty(
         &mut out,
@@ -497,7 +532,8 @@ fn finish_dataset(
         counts.metrics.valid_kmers
     );
     let entry = serde_json::json!({"name":dataset.name, "path":dataset.path, "mode":dataset.mode,
-        "output":format!("datasets/{filename}"), "metrics":counts.metrics,"quantization":quantization});
+        "output":format!("datasets/{filename}"), "metrics":counts.metrics,"quantization":quantization,
+        "total_kmers":{"numerator":counts.metrics.weighted_kmers.to_string(),"scale":dataset.mode.scale()}});
     Ok((counts, entry))
 }
 

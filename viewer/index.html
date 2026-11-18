@@ -6,47 +6,157 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <header><a class="wordmark" href="./">EXPRESSO<span>ABUNDANCE EXPLORER</span></a><span class="local">● Local file · private by design</span></header>
+  <header><a class="wordmark" href="./">EXPRESSO<span>ABUNDANCE EXPLORER</span></a></header>
   <main>
-    <div class="intro"><p class="eyebrow">FROM SEQUENCE TO SIGNAL</p><h1>Your counts, in context.</h1><p>Explore exon or gene abundance across datasets. Select targets, compare their signals, and export the view.</p></div>
-    <section class="source card"><div><h2>Open your abundance index</h2><p>Choose the <code>.eai</code> file produced by <code>expresso pack</code>. Data stays in this browser.</p></div><label class="button">Choose index<input id="file" type="file" accept=".eai" hidden></label></section>
-    <p id="status" role="status" aria-live="polite">No index loaded. Open a file to begin.</p>
+    <section class="source card"><div><h2>Open your abundance index</h2><p>Select an <code>.eai</code> file.</p></div><label class="button">Choose index<input id="file" type="file" accept=".eai" hidden></label></section>
+    <p id="status" role="status" aria-live="polite">No index loaded.</p>
+    <div id="operation-progress" class="operation-progress" hidden><span id="progress-label"></span><progress id="progress-bar" aria-label="Computation progress"></progress></div>
     <div id="controls" hidden>
-      <div class="metrics"><div><span id="target-count">—</span><small id="target-kind">TARGETS</small></div><div><span id="dataset-count">—</span><small>DATASETS</small></div><div><span id="file-size">—</span><small>INDEX SIZE</small></div><div><span>WASM</span><small>LOCAL DECODING</small></div></div>
+      <div class="metrics"><div><span id="target-count">—</span><small id="target-kind">TARGETS</small></div><div><span id="dataset-count">—</span><small>DATASETS</small></div><div><span id="file-size">—</span><small>INDEX SIZE</small></div></div>
       <div class="workspace">
         <aside class="card">
-          <h2>Build your view</h2><p class="muted">Search, then select targets and datasets.</p>
+          <h2>Selection</h2>
           <label for="targets-search" id="targets-label">Exons / genes</label><input id="targets-search" type="search" placeholder="Search name or #ID">
-          <div id="targets" class="choices" role="group" aria-label="Targets"></div><small id="targets-note"></small><button id="select-targets" class="secondary">Select all matching targets</button>
-          <label for="target-list">Paste target names or #IDs</label><textarea id="target-list" rows="2" placeholder="One per line"></textarea><button id="apply-targets" class="secondary">Select target list</button>
+          <div id="targets" class="choices" role="group" aria-label="Targets"></div><small id="targets-note"></small><button id="select-targets" class="secondary">Select matching targets</button>
+          <label for="target-list">Paste target names or #IDs</label><textarea id="target-list" rows="2" placeholder="One per line"></textarea><button id="apply-targets" class="secondary">Use target list</button>
           <label for="datasets-search">Datasets</label><input id="datasets-search" type="search" placeholder="Search dataset names">
-          <div id="datasets" class="choices" role="group" aria-label="Datasets"></div><small id="datasets-note"></small><button id="select-datasets" class="secondary">Select all matching datasets</button>
-          <label for="dataset-list">Paste dataset names</label><textarea id="dataset-list" rows="2" placeholder="One per line"></textarea><button id="apply-datasets" class="secondary">Select dataset list</button>
+          <div id="datasets" class="choices" role="group" aria-label="Datasets"></div><small id="datasets-note"></small><button id="select-datasets" class="secondary">Select matching datasets</button>
+          <label for="dataset-list">Paste dataset names</label><textarea id="dataset-list" rows="2" placeholder="One per line"></textarea><button id="apply-datasets" class="secondary">Use dataset list</button>
           <div class="range"><div><label for="min">Min count</label><input id="min" inputmode="numeric" placeholder="0"></div><div><label for="max">Max count</label><input id="max" inputmode="numeric" placeholder="No limit"></div></div>
           <label for="scale">Color scale</label><select id="scale"><option value="log">Logarithmic · log₁₀(count + 1)</option><option value="linear">Linear</option></select>
-          <button id="draw" class="button full">Visualize selection</button><button id="cancel" class="secondary full" hidden>Cancel operation</button><button id="clear" class="secondary full">Clear selection</button>
+          <button id="draw" class="button full">Update heatmap</button><button id="cancel" class="secondary full" hidden>Cancel operation</button><button id="clear" class="secondary full">Clear selection</button>
         </aside>
         <section class="card visualization">
-          <div class="view-heading"><div><p class="eyebrow">ABUNDANCE HEATMAP</p><h2 id="view-title">Select your first comparison</h2></div><div class="export-buttons"><button id="download" class="secondary" disabled>Visible CSV ↓</button><button id="export-selection" class="secondary" disabled>Full selection CSV ↓</button><button id="clear-export" class="secondary" hidden>Clear temporary CSV</button></div></div>
-          <p class="muted">Rows are targets; columns are datasets. Pages load on demand. Hiding all-zero rows and abundance sorting scan your selection once without keeping the full matrix. Colors scale to the current page.</p><p id="view-details" class="muted"></p>
+          <div class="theme-controls"><label for="main-color">Main color <input id="main-color" type="color" value="#2563eb"></label><select id="color-preset" aria-label="Color preset"><option value="#2563eb">Blue</option><option value="#15803d">Green</option><option value="#7c3aed">Purple</option><option value="#c2410c">Orange</option><option value="custom">Custom</option></select></div>
+          <nav class="view-tabs" role="tablist" aria-label="Views">
+            <button id="overview-tab" class="secondary" role="tab" aria-selected="true" aria-controls="overview-view">Global overview</button>
+            <button id="datasets-tab" class="secondary" role="tab" aria-selected="false" aria-controls="datasets-view">Dataset list</button>
+            <button id="target-summary-tab" class="secondary" role="tab" aria-selected="false" aria-controls="target-summary-panel">Gene list</button>
+            <button id="comparison-tab" class="secondary" role="tab" aria-selected="false" aria-controls="comparison-view">Heatmap</button>
+            <button id="ranking-tab" class="secondary" role="tab" aria-selected="false" aria-controls="ranking-view">Dataset focus</button>
+            <button id="target-focus-tab" class="secondary" role="tab" aria-selected="false" aria-controls="target-focus-view">Gene focus</button>
+          </nav>
+          <div id="shared-options" class="view-options"><div id="transcript-metric-controls" hidden><label for="transcript-metric">Transcript metric</label><select id="transcript-metric"><option value="assigned_observations">Assigned k-mer observations</option><option value="abundance">EM abundance · coverage rate</option></select></div><div><label for="normalization">Normalization</label><select id="normalization"><option value="none">Raw counts</option><option value="cpm">Per million dataset k-mers · CPM</option><option value="coverage">Per target k-mer position · coverage</option><option value="length-cpm">CPM / target k-mer length</option></select></div><div><label for="number-format">Number format</label><select id="number-format"><option value="full">Full values</option><option value="human">Compact · K / M / G / T</option><option value="scientific">Scientific · 3 significant digits</option></select></div></div>
+          <section id="overview-view" role="tabpanel" aria-labelledby="overview-tab">
+            <div class="view-heading"><div><h2>Global overview</h2></div><button id="download-overview" class="secondary" disabled>Overview CSV ↓</button></div>
+
+            <div id="overview-cards" class="summary-cards"></div>
+            <details class="advanced-options"><summary>Global summary options</summary><div class="summary-options">
+              <div><label for="overview-threshold">Cells with expression above X</label><input id="overview-threshold" value="0" inputmode="decimal"></div>
+              <div><label for="overview-percentiles">Percentiles</label><input id="overview-percentiles" value="10, 90, 95, 99"></div>
+              <div><label for="overview-quantiles">Quantiles</label><select id="overview-quantiles"><option value="sample">Bounded sample (4,096 cells)</option><option value="exact">Exact distribution</option></select></div>
+            </div></details>
+            <button id="compute-overview" class="button">Update summary</button><p id="overview-details" class="muted"></p>
+          </section>
+          <section id="datasets-view" role="tabpanel" aria-labelledby="datasets-tab" hidden>
+            <div class="view-heading"><div><h2>Dataset list</h2></div><button id="download-datasets" class="secondary" disabled>Calculated rows CSV ↓</button></div>
+
+            <div class="summary-options">
+              <div><label for="dataset-list-scope">Dataset scope</label><select id="dataset-list-scope"><option value="selected">Selected real datasets</option><option value="all">All real datasets</option></select></div>
+              <div><label for="dataset-list-targets">Target scope</label><select id="dataset-list-targets"><option value="selected">Selected targets</option><option value="all">All targets</option></select></div>
+              <div><label for="dataset-list-threshold">Targets with expression above X</label><input id="dataset-list-threshold" value="0" inputmode="decimal"></div>
+              <div><label for="dataset-list-percentiles">Percentiles</label><input id="dataset-list-percentiles" value="10, 90, 95, 99"></div>
+              <div><label for="dataset-list-quantiles">Quantiles</label><select id="dataset-list-quantiles"><option value="sample">Bounded sample (4,096 targets)</option><option value="exact">Exact distribution</option></select></div>
+              <div><label for="dataset-list-sort">Sort by</label><select id="dataset-list-sort"><option value="reference">Index order</option><option value="name">Name</option><option value="total">Total</option><option value="mean">Mean</option><option value="median">Median</option><option value="nonzero">Expressed targets</option><option value="above">Targets above X</option></select><select id="dataset-list-direction" aria-label="Dataset list sort direction"><option value="desc">Descending</option><option value="asc">Ascending</option></select></div>
+            </div>
+            <div class="summary-actions"><button id="compute-dataset-page" class="button">Update page</button><button id="compute-datasets-all" class="secondary">Calculate all datasets</button></div>
+            <p id="datasets-details" class="muted"></p><div id="datasets-table" class="heatmap summary-table"></div>
+            <div class="paging"><span id="datasets-page-label"></span><div><button id="datasets-prev" class="secondary">← Datasets</button><button id="datasets-next" class="secondary">Datasets →</button></div></div>
+          </section>
+          <section id="ranking-view" class="dataset-panel" role="tabpanel" aria-labelledby="ranking-tab" hidden>
+            <div class="view-heading"><div><h2 id="dataset-summary-title">Dataset summary</h2><span id="ranking-title" hidden>Most expressed genes</span></div><div class="export-buttons"><button id="download-dataset-summary" class="secondary" disabled>Dataset statistics CSV ↓</button><button id="download-ranking" class="secondary" disabled>Ranking CSV ↓</button><button id="download-ranking-svg" class="secondary" disabled>Chart SVG ↓</button></div></div>
+
+            <details class="advanced-options"><summary>Dataset summary options</summary><div class="summary-options">
+              <div><label for="ranking-datasets">Datasets</label><select id="ranking-datasets"><option value="all">All real datasets</option><option value="selected">Selected real datasets</option></select></div>
+              <div><label for="ranking-limit">Top N</label><input id="ranking-limit" type="number" min="1" max="1000" value="20"></div>
+              <div><label for="ranking-targets">Rank candidates</label><select id="ranking-targets"><option value="all">All targets</option><option value="selected">Selected targets</option></select></div>
+              <div><label for="ranking-values">Rank by</label><select id="ranking-values"><option value="none">Raw counts / chosen transcript metric</option><option value="cpm">Per million dataset k-mers · CPM</option><option value="coverage">Per target k-mer position · coverage</option><option value="length-cpm">CPM / target k-mer length</option></select></div>
+              <div id="ranking-transcript-controls" hidden><label for="ranking-transcript-metric">Transcript metric</label><select id="ranking-transcript-metric"><option value="assigned_observations">Assigned k-mer observations</option><option value="abundance">EM abundance · coverage rate</option></select></div>
+              <div><label for="ranking-denominator">Percentage denominator</label><select id="ranking-denominator"><option value="signal">All target signal</option><option value="input">Full dataset k-mer total</option></select></div>
+              <div><label for="ranking-axis">Bar scale</label><select id="ranking-axis"><option value="fit">Fit to largest bar</option><option value="fixed">Fixed 0–100%</option></select></div>
+              <div><label for="ranking-format">Number format</label><select id="ranking-format"><option value="human">Compact · K / M / G / T</option><option value="full">Full values</option><option value="scientific">Scientific · 3 significant digits</option></select></div>
+              <div><label class="toggle"><input id="ranking-other" type="checkbox" checked>Show other targets as a bar</label></div>
+              <div><label for="ranking-threshold">Targets with expression above X</label><input id="ranking-threshold" value="0" inputmode="decimal"></div>
+              <div><label for="ranking-percentiles">Percentiles (0–100)</label><input id="ranking-percentiles" value="10, 90, 95, 99"></div>
+              <div><label for="ranking-quantiles">Median / percentile computation</label><select id="ranking-quantiles"><option value="sample">Bounded sample (4,096 targets)</option><option value="exact">Exact distribution</option></select></div>
+            </div></details>
+            <div class="ranking-navigation"><button id="ranking-prev" class="secondary">← Dataset</button><label for="ranking-position">Dataset position <input id="ranking-position" type="number" min="1" value="1"></label><button id="ranking-next" class="secondary">Dataset →</button><button id="draw-ranking" class="button">Update dataset summary</button></div>
+            <div class="ranking-find"><label for="ranking-name">Find a dataset by exact name</label><input id="ranking-name" placeholder="sample_A1"><button id="ranking-find" class="secondary">Find</button></div>
+            <p id="ranking-details" class="muted"></p>
+            <div id="dataset-summary-cards" class="summary-cards" hidden></div>
+            <div id="ranking-chart" class="ranking-chart" hidden></div>
+          </section>
+          <section id="target-summary-panel" class="target-summary-panel" role="tabpanel" aria-labelledby="target-summary-tab" hidden><span id="target-summary-toggle" hidden>Target list</span>
+          <section class="summary-panel" aria-labelledby="summary-title">
+            <div class="view-heading"><div><h2 id="summary-title">Target summaries</h2></div><button id="download-summary" class="secondary" disabled>Summary CSV ↓</button></div>
+
+            <div class="summary-options">
+              <div><label for="summary-scope">Datasets to summarize</label><select id="summary-scope"><option value="all">All datasets</option><option value="selected">Selected datasets</option></select></div>
+              <div><label for="summary-values">Values</label><select id="summary-values"><option value="raw">Raw counts / chosen transcript metric</option><option value="view">Apply the view normalization</option></select></div>
+              <div><label for="summary-threshold">Count above X (strictly &gt;)</label><input id="summary-threshold" value="0" inputmode="decimal"></div>
+              <div><label for="summary-percentiles">Percentiles (0–100)</label><input id="summary-percentiles" value="10, 25, 75, 90, 95, 99"></div>
+              <div><label for="summary-quantiles">Quantile computation</label><select id="summary-quantiles"><option value="exact">Exact distribution</option><option value="sample">Bounded sample · approximate</option></select></div>
+              <div><label for="summary-sample-size">Sample size per target</label><input id="summary-sample-size" type="number" min="256" max="65536" value="4096"></div>
+              <div><label for="summary-interpolation">Percentile definition</label><select id="summary-interpolation"><option value="linear">Linear interpolation</option><option value="nearest-rank">Nearest rank</option></select></div>
+              <div><label class="toggle"><input id="summary-exclude-zeros" type="checkbox">Exclude zeros from distributions</label></div>
+            </div>
+            <fieldset class="summary-metrics"><legend>Statistics to display and export</legend>
+              <label><input type="checkbox" value="total" checked>Total abundance</label>
+              <label><input type="checkbox" value="above" checked>Datasets above X</label>
+              <label><input type="checkbox" value="above_percent" checked>% above X</label>
+              <label><input type="checkbox" value="mean" checked>Mean</label>
+              <label><input type="checkbox" value="median" checked>Median</label>
+              <label><input type="checkbox" value="percentiles" checked>Percentiles</label>
+              <label><input type="checkbox" value="min">Minimum</label>
+              <label><input type="checkbox" value="max">Maximum</label>
+              <label><input type="checkbox" value="stddev">Standard deviation</label>
+              <label><input type="checkbox" value="nonzero">Nonzero datasets</label>
+            </fieldset>
+            <div class="summary-actions"><button id="compute-summary" class="button">Update summaries</button><label for="summary-sort">Sort by <select id="summary-sort"><option value="reference">Reference order</option><option value="name">Target name</option></select></label><select id="summary-direction" aria-label="Summary sort direction"><option value="desc">Descending</option><option value="asc">Ascending</option></select><label class="toggle"><input id="summary-color" type="checkbox" checked>Color by statistic</label></div>
+            <p id="summary-details" class="muted"></p>
+            <div id="summary-table" class="heatmap summary-table" hidden></div>
+            <div id="summary-paging" class="paging" hidden><span id="summary-page-label"></span><div><button id="summary-prev" class="secondary">← Targets</button><button id="summary-next" class="secondary">Targets →</button></div></div>
+          </section>
+          </section>
+          <div id="comparison-view" role="tabpanel" aria-labelledby="comparison-tab" hidden>
+          <div class="view-heading"><div><h2 id="view-title">Heatmap</h2></div><div class="export-buttons"><button id="download" class="secondary" disabled>Visible CSV ↓</button><button id="export-selection" class="secondary" disabled>Full selection CSV ↓</button><button id="clear-export" class="secondary" hidden>Clear temporary CSV</button></div></div>
+          <p id="view-details" class="muted"></p>
           <div class="view-options">
-            <div><label for="value-mode">Cell values</label><select id="value-mode"><option value="raw">Abundance counts</option><option value="log">log₁₀(count + 1)</option></select></div>
-            <div><label for="number-format">Number format</label><select id="number-format"><option value="full">Full integers</option><option value="human">Compact · K / M / G / T</option><option value="scientific">Scientific · 3 significant digits</option></select></div>
-            <div><label class="toggle"><input id="hide-empty" type="checkbox">Hide all-zero rows</label><small>Across all selected datasets, including other pages.</small></div>
+
+
+            <div><label for="value-mode">Cell values</label><select id="value-mode"><option value="raw">Abundance counts</option><option value="log">log₁₀(count + 1)</option><option value="fold">Fold change · value / target mean</option><option value="log-fold">Log₂ fold change · log₂(value / target mean)</option></select></div>
+
+            <div><label class="toggle"><input id="hide-empty" type="checkbox">Hide all-zero rows</label></div>
             <div><label for="row-sort">Sort targets</label><select id="row-sort"><option value="reference">Reference order</option><option value="name-asc">Name · A → Z</option><option value="name-desc">Name · Z → A</option><option value="total-desc">Total abundance · highest first</option><option value="total-asc">Total abundance · lowest first</option><option value="max-desc">Maximum abundance · highest first</option><option value="detected-desc">Detected datasets · most first</option></select></div>
             <div><label for="column-sort">Sort datasets</label><select id="column-sort"><option value="reference">Index order</option><option value="name-asc">Name · A → Z</option><option value="name-desc">Name · Z → A</option><option value="total-desc">Total abundance · highest first</option><option value="total-asc">Total abundance · lowest first</option><option value="max-desc">Maximum abundance · highest first</option><option value="detected-desc">Detected targets · most first</option></select></div>
-            <div><button id="apply-view" class="secondary">Apply view options</button><small>Abundance sorting uses your full selection.</small></div>
+            <div><button id="apply-view" class="secondary">Apply view options</button></div>
           </div>
-          <div id="empty" class="empty"><span>▦</span><h3>A clearer view of your data</h3><p>Select targets and datasets on the left, then visualize.</p></div>
+
+          <div id="empty" class="empty"><span>▦</span><p>Select targets and datasets, then update the heatmap.</p></div>
           <div id="paging" class="paging" hidden><span id="page-summary"></span><div class="page-jump"><label>Target position <input id="row-position" type="number" min="1" value="1"></label><label>Dataset position <input id="column-position" type="number" min="1" value="1"></label><button id="jump-page" class="secondary">Go to position</button></div><div><button id="prev-rows" class="secondary">← Targets</button><button id="next-rows" class="secondary">Targets →</button><button id="prev-columns" class="secondary">← Datasets</button><button id="next-columns" class="secondary">Datasets →</button></div></div>
           <div id="heatmap" class="heatmap" hidden></div>
-          <div id="legend" class="legend" hidden><span id="legend-min">0</span><div class="gradient"></div><span id="legend-max">0</span><small>Gray cells are outside the selected range.</small></div>
-          <p class="footnote">Counts are decoded, approximate k-mer observations; they are not TPM. Cell values can show log₁₀(count + 1), independently of color scaling. Compact suffixes use powers of 1,000; scientific notation uses 3 significant digits. CSV exports retain decoded counts, independent of display formatting, and follow the applied target/dataset order and hidden-row selection. Bounds always apply to counts and are inclusive. Out-of-range cells export as empty fields, never as zero. Full selection CSV streams matching counts in long format (target, dataset, abundance) to local temporary storage. The global sum was computed before quantization.</p>
+          <div id="legend" class="legend" hidden><span id="legend-min">0</span><div class="gradient"></div><span id="legend-max">0</span><small id="legend-note"></small></div>
+
+          </div>
+
+          <section id="target-focus-view" role="tabpanel" aria-labelledby="target-focus-tab" hidden>
+            <div class="view-heading"><div><h2 id="target-focus-title">Target focus</h2></div><div class="export-buttons"><button id="download-target-focus" class="secondary" disabled>Statistics CSV ↓</button><button id="download-target-page" class="secondary" disabled>Visible profile CSV ↓</button><button id="download-target-svg" class="secondary" disabled>Chart SVG ↓</button></div></div>
+            <div class="ranking-find"><label for="target-focus-name">Target name or original #ID</label><input id="target-focus-name" value="#1"><button id="load-target-focus" class="button">Update profile</button></div>
+            <div class="summary-options">
+              <div><label for="target-focus-scope">Datasets</label><select id="target-focus-scope"><option value="all">All real datasets</option><option value="selected">Selected real datasets</option></select></div>
+              <div><label for="target-focus-threshold">Datasets with expression above X</label><input id="target-focus-threshold" value="0" inputmode="decimal"></div>
+              <div><label for="target-focus-percentiles">Percentiles</label><input id="target-focus-percentiles" value="10, 90, 95, 99"></div>
+              <div><label for="target-focus-quantiles">Quantiles</label><select id="target-focus-quantiles"><option value="sample">Bounded sample (4,096 datasets)</option><option value="exact">Exact distribution</option></select></div>
+              <div><label for="target-focus-limit">Top datasets</label><input id="target-focus-limit" type="number" min="1" max="1000" value="20"></div>
+            </div>
+            <p id="target-focus-details" class="muted"></p>
+            <div id="target-focus-cards" class="summary-cards"></div><div id="target-focus-chart" class="ranking-chart" hidden></div>
+            <div id="target-focus-table" class="heatmap summary-table"></div><div class="paging"><span id="target-focus-page-label"></span><div><button id="target-focus-prev" class="secondary">← Datasets</button><button id="target-focus-next" class="secondary">Datasets →</button></div></div>
+          </section>
         </section>
       </div>
     </div>
   </main>
-  <footer>EXPRESSO / Exon and gene abundance · No uploads, no external services</footer>
   <script type="module" src="app.js"></script>
 </body>
 </html>

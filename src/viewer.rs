@@ -42,6 +42,22 @@ fn request(mut stream: TcpStream) -> Result<()> {
             "text/javascript; charset=utf-8",
             include_bytes!("../viewer/display.js"),
         )),
+        "/statistics.js" => Some((
+            "text/javascript; charset=utf-8",
+            include_bytes!("../viewer/statistics.js"),
+        )),
+        "/ranking.js" => Some((
+            "text/javascript; charset=utf-8",
+            include_bytes!("../viewer/ranking.js"),
+        )),
+        "/explorer.js" => Some((
+            "text/javascript; charset=utf-8",
+            include_bytes!("../viewer/explorer.js"),
+        )),
+        "/progress.js" => Some((
+            "text/javascript; charset=utf-8",
+            include_bytes!("../viewer/progress.js"),
+        )),
         "/expresso_viewer.wasm" => Some((
             "application/wasm",
             include_bytes!("../viewer/expresso_viewer.wasm"),
