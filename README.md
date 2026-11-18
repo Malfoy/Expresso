@@ -2,468 +2,63 @@
 
 **EXon-level RNA EXPRESsion quantificatiOn**
 
-A parallel Rust tool for counting exon- or gene-specific k-mer observations in reads or
-abundance-annotated unitigs. Build an index once, quantify many datasets, and
-store one compact abundance vector per dataset plus a global sum.
+Count exon or gene expression across reads and abundance-annotated unitigs.
+Explore the results in a WebAssembly viewer, select samples and targets,
+and export the tables you need.
 
-EXPRESSO combines [**GGCAT simplitigs**](https://github.com/algbio/ggcat),
-the [**Rust SSHash dictionary**](https://github.com/COMBINE-lab/sshash-rs), and
-[**Helicase FASTA/FASTQ parsing**](https://github.com/imartayan/helicase).
+[Try the viewer](#try-the-webassembly-viewer) · [Install](#install-the-command-line-tool) · [First analysis](#run-your-first-analysis) · [Your data](#analyze-your-own-data) · [Export CSV](#export-results) · [Advanced analyses](#advanced-analyses)
 
-## How it works
+## Try the WebAssembly viewer
 
-```mermaid
-flowchart LR
-    A[Reference FASTA] --> B[GGCAT simplitigs]
-    B --> C[Rust SSHash index]
-    A --> D[K-mer ownership]
-    C --> E[Parallel queries]
-    D --> E
-    F[Reads or weighted unitigs] --> G[Helicase parsing]
-    G --> E
-    E --> H[Exact integer counts]
-    H --> I[Per-dataset vectors]
-    H --> J[Global sum]
-    I --> K[Compact EAB or exact CSV]
-    J --> K
-```
-
-## Installation
-
-Requirements: **Rust 1.89+**, a C/C++ toolchain, and `pkg-config`.
-**GGCAT is built into EXPRESSO** as a Rust dependency and installed automatically
-with it; no separate GGCAT installation is required.
+### 1. Start the viewer — no compilation needed
 
 ```bash
 git clone https://github.com/Malfoy/Expresso.git
 cd Expresso
-cargo build --release --locked
-export PATH="$PWD/target/release:$PATH"
-
-expresso --help
+python3 -m http.server 8765 --bind 127.0.0.1 --directory viewer
 ```
 
-Alternatively, install the executable into Cargo's binary directory:
+Open **[http://127.0.0.1:8765](http://127.0.0.1:8765)**. Keep the terminal running.
 
-```bash
-RUSTFLAGS="-C target-cpu=native" cargo install --path . --locked
-```
-
-The repository's Cargo configuration enables `target-cpu=native` for SIMD.
-Build on the machine that will run EXPRESSO, or one with the same CPU instruction
-set. `--features no-pdep` is available for older AMD CPUs.
-
-## Quick start
-
-To try the browser interface immediately, follow the
-[WebAssembly viewer toy walkthrough](#try-the-viewer-with-the-included-toy-dataset).
-It includes a ready-to-open index and all inputs needed to reproduce it.
-
-Run the included small example:
-
-```bash
-expresso run \
-  --exons examples/exons.fa --index example-index --k 7 \
-  --fof examples/datasets.tsv --output example-results \
-  --threads 4 --jobs 2 --stats
-
-expresso export \
-  --input example-results --output example-csv \
-  --compression none --with-names
-```
-
-For your own data, build once and reuse the index:
-
-```bash
-expresso build \
-  --exons exons.fa.gz --index exon-index \
-  --k 31 --threads 16 --memory-gb 8
-
-expresso quantify \
-  --index exon-index --fof datasets.tsv --output results \
-  --threads 16 --jobs 4 --mode unitigs
-
-expresso inspect --index exon-index
-```
-
-Use `--mode reads` for FASTA/FASTQ reads, `--mode unitigs` for abundance-annotated
-unitigs, or `--mode auto` to infer weighting record by record. Explicit modes in
-the dataset list override the command-line mode.
-
-Index, result, and export destinations must be **new directories**. Work is
-staged beside the destination and published when complete. `--temp-dir /scratch`
-relocates index-construction scratch files.
-
-## Inputs
-
-### Generate exons from a GTF and genome
-
-Extract a FASTA with one header and one unwrapped sequence line per exon:
-
-```bash
-expresso extract-exons \
-  --gtf annotation.gtf.gz --genome genome.fa.gz --output exons.fa
-```
-
-GTF and genome inputs can be plain, gzip, xz, or zstd; compression is detected
-from their contents. Repeat `--genome` for multiple FASTA files (for example,
-one per chromosome); `--reference` is an alias. Output is plain FASTA by default.
-For compressed output, specify both the codec and the matching filename, such
-as `--output exons.fa.zst --compression zstd`.
-
-You can also build directly from these inputs, without a separate extraction:
-
-```bash
-expresso build \
-  --gtf annotation.gtf.gz --genome genome.fa.gz \
-  --index exon-index --k 31 --threads 16
-```
-
-`run` accepts the same `--gtf` and `--genome` options in place of `--exons`.
-The generated FASTA is retained as `reference-exons.fa` inside the index.
-
-Only GTF `exon` features are extracted. Coordinates are 1-based and inclusive;
-negative-strand exons are reverse-complemented, including IUPAC ambiguity codes.
-Repeated `(contig, start, end, strand)` intervals are merged across transcripts,
-while identical sequences at different loci remain separate targets. Available
-`exon_id` and `gene_id` attributes are retained in FASTA header descriptions.
-Headers use generated IDs and genomic coordinates; special characters in names
-are percent-escaped. Output follows genome contig order, then coordinate/strand
-order within each contig, independently of GTF line order.
-
-Use the matching **genomic** reference, with exactly the same contig names as
-the GTF. Missing or duplicate contigs, invalid coordinates, and invalid exon DNA
-are errors. Extraction streams genome records through Helicase and retains the
-annotation plus the current contig in memory. Output files must be new and are
-published only after successful extraction.
-
-### Reference FASTA
-
-Each FASTA **record** is one target: a header followed by its sequence.
-One sequence line per exon is supported; wrapped sequences and CRLF line endings
-are also accepted.
-
-```fasta
->exon_1
-ACGTTGCAACGTTGCAACGTTGCAACGTTGCA
->exon_2
-GGTACCATGGTACCATGGTACCATGGTACCAT
-```
-
-Target IDs are 1-based in reference order. The first header token supplies the
-name. Duplicate names or identical sequences in separate records remain
-separate targets. Short targets and targets without usable unique k-mers remain
-in every vector as zeros. A reference without any valid k-mers cannot be indexed.
-
-Transcripts or genes can also be reference records; they are then the units
-being quantified. Use `--level gene` for gene references; output columns become `gene_id` and
-`gene_name`. The default exon mode retains `exon_id` and `exon_name`.
-
-### Dataset list
-
-Supply one absolute or relative path per line:
-
-```text
-/data/sample_A.fastq.gz
-reads/sample_B.fasta.xz
-unitigs/sample_C.fa.zstd
-```
-
-Relative paths resolve from the **list's directory**, not the working directory.
-Blank lines and lines starting with `#` are ignored. Paths may contain spaces.
-Inferred names include a numeric prefix, such as `000001_sample_A.eab.zst`.
-Every line is a dataset: listing the same file twice counts it twice in the sum.
-
-For explicit names and mixed data types, use **actual tabs** between columns:
-
-```text
-sample_A	/data/sample_A.fastq.gz	reads
-sample_B	reads/sample_B.fa.xz	reads
-sample_C	unitigs/sample_C.fa.zstd	unitigs
-```
-
-The mode column is optional. Names must be unique and contain only ASCII
-letters, digits, `_`, `-`, or `.`; `.` and `..` alone are not valid names.
-
-## Implementation details
-
-### Compression and record formats
-
-Reference and query files can be uncompressed, gzip, xz, or Zstandard.
-
-FASTA and conventional four-line FASTQ are supported. Compression is detected
-from file contents, including concatenated gzip/xz/zstd streams. Files do not
-need a particular extension for `quantify`; `.zst` and `.zstd` both work.
-
-### Counting semantics
-
-| Setting or rule | Behavior |
-| --- | --- |
-| k-mer length | Odd k from 3 to 63; default 31 |
-| Strand | A k-mer and its reverse complement are equivalent |
-| Ambiguity | Non-ACGT bases interrupt k-mers; flanking DNA is never joined |
-| Shared sequence | K-mers assigned to multiple targets contribute to none; gene mode groups records by gene ID |
-| Repeated sequence | Repetitions within one target retain that target as owner |
-| `--mode reads` | Every matching occurrence contributes 1 |
-| `--mode unitigs` | Every matching occurrence contributes the header abundance |
-| `--mode auto` | Use abundance when present; otherwise count as reads |
-
-Lowercase DNA is accepted. Sequence formatting whitespace is removed.
-Occurrences are counted independently, without read deduplication or paired-end
-fragment correction. Abundance is a **sum of uniquely assigned k-mer
-observations**, without length or library-size normalization: it is not a
-transcript count, TPM, or RPKM.
-
-Supported mean-abundance tags are `ka:f:`, `km:f:`, `ka:i:`, and `km:i:`.
-A tag may be the first token, including a header without an identifier. Mean
-tags take precedence over `KC:i:`. With only `KC:i:`, the weight is
-`KC / (sequence_length - assembly_k + 1)`; set `--unitig-k` when the assembly k
-differs from the index k. Missing abundance fails in `unitigs` mode; malformed
-abundance fails in both `unitigs` and `auto` modes.
-
-Unitig weights apply uniformly along each sequence. Mean coverage cannot recover
-the original per-k-mer read counts. Generate GGCAT unitigs with abundance support.
-
-Weights are accumulated as fixed-point millionths; extra decimal places round
-half up at ingestion. Each target/dataset is rounded to the nearest integer,
-ties up, **after summing**. Reads use exact `u64` counts. Unitig/auto mode uses
-`u64` millionths, allowing approximately 18.4 trillion weighted observations per
-target/dataset. Overflow is reported explicitly. The shared reference table
-includes the number of distinct usable k-mers for downstream normalization.
-
-## Gene quantification
-
-Build a gene index from the annotation and matching genomic reference:
-
-```bash
-expresso build --level gene \
-  --gtf annotation.gtf.gz --genome genome.fa.gz \
-  --index gene-index --k 31 --threads 16
-
-expresso quantify --index gene-index --fof datasets.tsv \
-  --output gene-results --threads 16 --jobs 4 --viewer-index
-```
-
-`run` accepts `--level gene` too. Exon quantification remains the default. The
-quantification level is saved in the index, so `quantify` reuses it automatically.
-
-Gene mode requires `gene_id` on annotated exons. Within each gene, overlapping
-exon intervals on the same contig and strand are merged. By default, separated
-intervals remain separate FASTA records and no junction sequences are added.
-All records bearing the same gene ID share one owner. A k-mer
-present in multiple exons of one gene remains usable, while one shared between
-different genes is excluded. This cannot be recovered by simply summing an
-existing exon index; build a gene index to obtain the correct ownership.
-
-The generated `reference-genes.fa` is retained in the index. Its first header
-token is the percent-escaped GTF gene ID; annotations do not substitute gene
-symbols. The reference table uses `gene_id,gene_name,length,unique_kmers`, with
-1-based numeric IDs and the annotation's gene ID as the name. Length sums the
-merged exonic intervals, and unique k-mers are counted once per gene.
-
-Alternatively supply FASTA with `--level gene --genes genes.fa`. Records with
-the same first header token are grouped into one gene; disconnected sequences
-must be separate records, rather than concatenated. Duplicate gene IDs are
-intentional in this mode. Length is the sum of supplied record lengths.
-
-### Exon junctions
-
-Add junction k-mers when building a gene index directly from GTF and genome:
-
-```bash
-# Junctions between consecutive exons of annotated transcripts.
-expresso build --level gene \
-  --gtf annotation.gtf.gz --genome genome.fa.gz \
-  --junctions annotated --index gene-junction-index --k 31 --threads 16
-
-# Annotated junctions plus every ordered pair of distinct, non-overlapping
-# merged exons in genes with at most 50 merged exons, including reverse order.
-expresso build --level gene \
-  --gtf annotation.gtf.gz --genome genome.fa.gz \
-  --junctions all --junction-max-exons 50 \
-  --index gene-all-junction-index --k 31 --threads 16
-```
-
-`--junctions none` is the default. `run` accepts the same options. Junction
-options require `--level gene`, `--gtf`, and `--genome`; they are unavailable in
-exon mode or when supplying a reference FASTA. Each annotated exon must have
-exactly one `gene_id` and `transcript_id`. Transcript exons are sorted by genomic
-coordinates in strand order; duplicate rows are deduplicated, and overlapping
-exons within a transcript or inconsistent gene/transcript membership are errors.
-
-Annotated mode uses up to `k-1` transcript bases on each side of each junction.
-This includes k-mers spanning several annotated junctions around short exons.
-All mode first merges intersecting exon intervals within each gene on the same
-contig and strand. Each merged exon spans the minimum start to the maximum end;
-overlap chains are merged transitively, while adjacent intervals without a
-shared base remain separate. It then joins each merged exon's last `k-1` bases
-to another's first `k-1` bases, respecting the gene's strand but allowing both
-exon orders. It includes exon skipping and reverse-order/back-splice candidates. It excludes
-self-pairs, overlapping exon pairs, and unannotated chains of three or more
-exons. A short pair contributes only the k-mers its available sequence supports.
-Candidate junctions are not evidence that those junctions occur biologically.
-
-The limit counts merged exons per gene and applies only to exhaustive pair
-generation. Genes above the limit still receive all their annotated junction
-contexts. The work per expanded gene grows quadratically with its exon count. `metadata.json`
-records the mode, limit, exon counting definition, annotated boundary count,
-additional ordered boundary pairs, emitted sequence records, and expanded/
-above-limit gene counts.
-
-Junction records appear in `reference-genes.fa` with `kind=junction` and donor/
-acceptor coordinates. They share their gene's owner and do not increase its
-reported exonic length. The dictionary stores distinct canonical k-mers: repeats
-within one gene count once, and k-mers shared between genes are excluded as usual.
-
-## Outputs and CSV export
-
-### Compact EAB: the default
-
-```text
-results/
-├── datasets/
-│   ├── sample_A.eab.zst
-│   └── sample_B.eab.zst
-├── global.eab.zst
-├── exons.csv.zst
-└── manifest.json
-```
-
-EAB v1 stores target names **once**, in `exons.csv.zst`. Each vector contains
-one code per target in the same order, an integer codebook, a reference SHA-256,
-and a CRC checksum. The manifest describes coverage, output files, counting
-metrics, and measured approximation errors.
-
-`--bits` accepts **2–16**, default **8**. Eight bits means one payload byte per
-target before compression, plus a small header/codebook. Larger values use a
-logarithmically spaced codebook fitted to each vector's observed maximum.
-
-- Zero/nonzero status is preserved exactly at every supported width.
-- At 8 bits, counts **0–15 are exact**. If the vector maximum is at most 255,
-  every count in that vector is exact.
-- Larger counts are approximate. More bits generally improve precision; error
-  depends on the vector's range and is recorded in the manifest.
-- Counts are not clipped to a fixed abundance ceiling.
-- Quantization is lossy; the subsequent zstd/gzip/xz compression is lossless.
-
-The design draws on the idea of logarithmic abundance discretization used in
-[REINDEER2](https://github.com/Yohan-HernandezCourbevoie/REINDEER2), with its
-own encoding and per-vector codebooks. Codes from different vectors must be
-decoded before comparing or adding them.
-
-### Global sum and optional statistics
-
-**The global sum is always produced**; no extra flag is required. It sums exact
-rounded dataset counts, then independently quantizes that total for compact
-output. Consequently, adding decoded dataset values may not reproduce the
-decoded global vector exactly.
-
-`--stats` additionally writes mean, median, minimum, maximum, and detected-dataset
-count under `statistics/`. Statistics include zero values and are computed from
-exact counts before quantization. The detected-dataset count can therefore be
-approximate, even though individual vectors preserve presence/absence exactly.
-Exact statistics require temporary disk space proportional to targets × datasets.
-
-### Export only what you need
-
-```bash
-# Every dataset and the global sum; one abundance column per dataset.
-expresso export --input results --output csv --compression zstd
-
-# Selected dataset, plain CSV; repeat --dataset to select more.
-expresso export --input results --output selected \
-  --dataset sample_A --compression none
-
-# Global sum only, with IDs and names.
-expresso export --input results --output global-csv --global-only --with-names
-```
-
-Without `--with-names`, dataset CSVs have a single `abundance` column and one
-integer per target. Global CSVs also include any requested statistics. With
-`--with-names`, target ID and name precede abundance (exon or gene columns). Export writes the selected
-reference rows and records source coverage in its manifest.
-
-Select targets, datasets, and an inclusive range of decoded counts:
-
-```bash
-expresso export --input results --output subset-csv \
-  --target-list selected-exons.txt --dataset-list selected-datasets.txt \
-  --min-value 10 --max-value 10000 --compression zstd
-
-# Names or explicit original 1-based IDs; flags can be repeated.
-expresso export --input gene-results --output selected-genes \
-  --gene ENSG00000123456.7 --target-id 42 --dataset sample_A
-```
-
-Lists contain one exact name per line; blank lines and `#` comments are ignored.
-Compressed lists are accepted. `--target` (aliases `--exon`, `--gene`) selects
-names, `--target-id` selects numeric IDs, and `--target-list` (alias `--exon-list`)
-selects names from a file. These target selections are combined as a union.
-Duplicate names select all matching targets; numeric IDs distinguish them.
-`--dataset-list` and repeated `--dataset` are combined likewise. Unknown names,
-out-of-range IDs, empty list files, and reversed bounds are errors.
-
-A target or value filter automatically adds ID/name columns and preserves
-original IDs and reference order. Bounds omit nonmatching rows **independently
-in each dataset CSV**; they do not clip counts or change the global sum. Bounds
-on global export apply to its abundance column. The accompanying reference
-table lists selected targets before the value filter; each CSV identifies its
-surviving rows. Dataset selection exports those datasets only; without it,
-all datasets plus the original global sum are exported. Use `--global-only`
-for just the global sum and available statistics.
-
-CSV export returns decoded representatives: it cannot restore values discarded
-by quantization. To retain exact original counts from the start, quantify with
-`--format csv`. This writes target ID, name, and abundance in every dataset CSV
-and an exact global CSV; repeating names makes these files much larger.
-
-| `--compression` | Compact vectors | CSVs |
-| --- | --- | --- |
-| `zstd` (default, level 3) | `.eab.zst` | `.csv.zst` |
-| `gz` | `.eab.gz` | `.csv.gz` |
-| `xz` | `.eab.xz` | `.csv.xz` |
-| `none` | `.eab` | `.csv` |
-
-This option is independent of input compression. The shared compact reference
-is `exons.csv.zst` or `genes.csv.zst`; exact CSV output uses the uncompressed table.
-
-### Portable abundance index and WebAssembly viewer
-
-#### Try the viewer with the included toy dataset
-
-The repository includes [examples/viewer/toy.eai](examples/viewer/toy.eai), a
-ready-to-open portable abundance index. It contains **six synthetic genes,
-four unitig datasets, the global sum, and five statistics**. No biological data
-download or index construction is needed to try it. The artificial samples
-have stronger `GENE_A` signal in group A, stronger `GENE_B` signal in group B,
-a constant `HOUSEKEEPING` signal, and an entirely absent `GENE_EMPTY`.
-
-**1. Start the local application.** After installing EXPRESSO, run from the
-repository root:
+Already installed EXPRESSO? Start the same viewer with:
 
 ```bash
 expresso view --port 8765
 ```
 
-Keep that terminal running and open **http://127.0.0.1:8765** in a current
-Firefox or Chromium-based browser. The command prints the URL; it does not
-automatically open a browser. If that port is occupied, choose another, such as
-`--port 9000`. Stop the server with Ctrl+C when finished.
+### 2. Open the included toy dataset
 
-**2. Open the toy index.** Click **Choose index** and select
-`examples/viewer/toy.eai` from your checkout. The summary should show **6 genes
-and 4 datasets**. The global sum and statistics also appear in the dataset
-selector, marked separately. Opening the file loads its catalogue; counts are
-read when you request a view. The selected file stays on your computer.
+Click **Choose index** and select **`examples/viewer/toy.eai`** in your checkout.
+It contains **6 genes × 4 samples**; no dataset download or quantification is needed.
 
-**3. Draw the first heatmap.** Leave the gene search empty and click
-**Select all matching targets**. Type `sample_` in the **Datasets** search and
-click **Select all matching datasets**. This selects the four samples without
-the global/statistic vectors. Leave count bounds blank, then click
-**Visualize selection**. You should see a **6 × 4** heatmap:
+The **Global overview** opens first. Check these values:
+
+| Total expression | Nonzero cells | Median |
+|---:|---:|---:|
+| 19,278 | 16 of 24 | 85 |
+
+### 3. Choose what you want to analyze
+
+| Tab | Use it to… |
+|---|---|
+| **Global overview** | Summarize the whole matrix: totals, detection, mean, median, and percentiles |
+| **Dataset list** | Compare samples; click a sample name to inspect it |
+| **Gene list** | Compare genes across samples; click a gene name to inspect it |
+| **Heatmap** | Compare selected genes and samples using colors, counts, or fold changes |
+| **Dataset focus** | See one sample's most expressed genes and their percentages |
+| **Gene focus** | See one gene's expression across samples, distribution, and fold changes |
+
+For exon or transcript indexes, **Gene list/focus** becomes **Exon** or **Transcript list/focus**.
+
+**Try this:** open **Dataset list**, then click **sample_A1**.
+In **Dataset focus**, `GENE_A` contributes **4,080 of 4,862**, or **83.92%** of the sample's gene signal.
+
+### 4. Explore the heatmap
+
+Click **Heatmap**. All six genes and four samples are already selected:
 
 | Gene | sample_A1 | sample_A2 | sample_B1 | sample_B2 |
-| --- | ---: | ---: | ---: | ---: |
+|---|---:|---:|---:|---:|
 | GENE_A | 4,080 | 3,060 | 68 | 102 |
 | GENE_B | 68 | 102 | 3,740 | 4,420 |
 | GENE_C | 0 | 0 | 340 | 510 |
@@ -471,262 +66,255 @@ the global/statistic vectors. Leave count bounds blank, then click
 | HOUSEKEEPING | 680 | 680 | 680 | 680 |
 | GENE_EMPTY | 0 | 0 | 0 | 0 |
 
-These are weighted k-mer observations, not read counts or TPM. Each synthetic
-gene has 34 distinct usable canonical 7-mers, so a full-length unitig with
-header abundance 20 contributes `34 × 20 = 680`. This demo uses 16 bits and
-counts below 65,536, which are represented exactly. Normal runs default to
-8 bits and may approximate larger values. Expected sample and global counts
-are also provided in [expected-counts.csv](examples/viewer/expected-counts.csv).
+Try these controls:
 
-**4. Explore the display controls.** Try the following changes:
+| Goal | What to select |
+|---|---|
+| Remove absent genes | **Hide all-zero rows**, then **Apply view options**; `GENE_EMPTY` disappears |
+| Find the strongest signals | **Sort targets → Total abundance · highest first**; `GENE_B` moves to the top |
+| Compare relative expression | **Cell values → Fold change** or **Log₂ fold change**, then **Update heatmap** |
+| Adjust for dataset size and target length | **Normalization → CPM / target k-mer length**, then **Update heatmap** |
+| Shorten large numbers | **Number format → Compact** or **Scientific** |
+| Change the palette | **Main color**; blue is the default |
 
-- Check **Hide all-zero rows**, then click **Apply view options**. `GENE_EMPTY`
-  disappears and the view becomes **5 × 4**. Only rows zero across every
-  selected dataset are hidden; `GENE_C` remains because group B has signal.
-- Set **Sort targets** to **Total abundance · highest first**, then apply.
-  `GENE_B` moves to the top. Dataset sorting uses the selected targets;
-  target sorting uses the selected datasets. You can also sort by name,
-  maximum count, or number of nonzero counts.
-- Set **Number format** to **Compact · K / M / G / T** to display `4080` as
-  `4.08K`, or **Scientific · 3 significant digits** to display `4.08e+3`.
-- Set **Cell values** to **log₁₀(count + 1)**. This changes the displayed
-  numbers; **Color scale** independently chooses logarithmic or linear
-  heatmap coloring. Hover or focus a cell to inspect its full decoded count.
-- Enter `100` in **Min count**, leave **Max count** blank, and visualize again.
-  Counts below 100 become gray. Bounds apply to the decoded counts, even
-  when log values are displayed. Clear the bound to restore the full view.
+Update buttons light up when parameters need applying and become dimmed when
+results are current. Computations lasting over 0.5 seconds show a progress bar.
 
-Target/dataset searches filter the choices, not an existing selection. Checkbox
-selections, **Select all matching**, and pasted lists add to the selection.
-Use **Clear selection** to start another comparison. To compare just two genes,
-paste the following into **Paste target names or #IDs**, click **Select target
-list**, select the four `sample_` datasets again, and visualize:
+### 5. Select genes and samples, then export
+
+Paste this into **Paste target names or #IDs**, then click **Use target list**:
 
 ```text
 GENE_A
 GENE_B
 ```
 
-Original numeric IDs work too, for example `#1` and `#2`. Dataset lists use
-their exact names, one per line. To inspect the aggregate, search for `global`
-in the dataset selector and select it. Its `GENE_A` count is **7,310**. Stored
-`mean`, `median`, `min`, `max`, and `datasets_detected` vectors are also available; these
-are statistics rather than additional biological samples.
+Paste this into **Paste dataset names**, then click **Use dataset list**:
 
-**5. Download your selection.** **Visible CSV** downloads the current page as
-a target-by-dataset matrix. **Full selection CSV** downloads all selected pages
-in long format, one matching target/dataset/count per row. With bounds, visible
-CSV uses blank fields for excluded cells; full-selection CSV omits them.
-Exports follow applied sorting and zero-row hiding, and always contain decoded
-integer counts, regardless of log or number formatting. After a full export
-finishes downloading, click **Clear temporary CSV** to remove its browser-local
-temporary file. **Cancel operation** stops a running load, scan, or export.
+```text
+sample_A1
+sample_B1
+```
 
-The toy fits on one page. Larger selections use pages of **100 targets × 25
-datasets**; navigate with the arrow buttons or **Go to position**. The viewer
-does not load the entire abundance matrix into memory. Hiding zero rows and
-sorting by abundance scan the selected vectors on request and retain summaries.
-Colors scale to the current page; use the legend when comparing values.
+Click **Update heatmap**, then **Visible CSV** to download the 2 × 2 comparison.
+Use **Full selection CSV** to export a selection spanning multiple pages.
 
-**6. Reproduce the toy index from its FASTA inputs (optional).** From the
-repository root, with new output directories:
+The [viewer guide](docs/VIEWER.md) has recipes for detection thresholds,
+percentiles, top-gene plots, fold changes, and larger indexes.
+
+## Install the command-line tool
+
+Requires **Rust 1.89+**, a C/C++ toolchain, and `pkg-config`.
+**GGCAT is installed with EXPRESSO.**
+
+From the cloned repository:
+
+```bash
+cargo build --release --locked
+export PATH="$PWD/target/release:$PATH"
+expresso --help
+```
+
+To install into your Cargo binary directory instead:
+
+```bash
+RUSTFLAGS="-C target-cpu=native" cargo install --path . --locked
+```
+
+## Run your first analysis
+
+Recreate the viewer demo from the included FASTA files:
 
 ```bash
 expresso run --level gene --genes examples/viewer/genes.fa \
-  --index viewer-demo-index --k 7 \
-  --fof examples/viewer/datasets.tsv --output viewer-demo-results \
-  --threads 4 --jobs 2 --bits 16 --stats --viewer-index
+  --fof examples/viewer/datasets.tsv \
+  --index viewer-demo-index --output viewer-demo-results \
+  --k 7 --threads 4 --jobs 2 --bits 16 --stats --viewer-index
 ```
 
-Open `viewer-demo-results/abundance.eai` with **Choose index** to get the same
-counts. [datasets.tsv](examples/viewer/datasets.tsv) uses actual tab separators
-and paths relative to its own directory. All sequences are synthetic; group
-labels are illustrative and have no biological interpretation.
+Open **`viewer-demo-results/abundance.eai`** in the viewer to explore the results.
+This reproduces the counts shown above. Use new index/output directory names
+when repeating an analysis.
 
-To check or export the bundled file without a browser:
+## Analyze your own data
+
+### 1. Make a dataset list
+
+This command creates a tab-separated file with **sample name, path, and mode**:
 
 ```bash
-expresso export --input examples/viewer/toy.eai \
-  --output viewer-demo-csv --compression none --with-names
+printf '%s\t%s\t%s\n' \
+  sample_A /data/sample_A.fastq.gz reads \
+  sample_B /data/sample_B.fastq.gz reads > datasets.tsv
 ```
 
-This writes one CSV per sample and a global CSV containing the sum and stored
-statistics. Exporting an `.eai` needs no k-mer index or original input datasets.
+Use `reads` for reads, `unitigs` for abundance-annotated Logan/GGCAT unitigs,
+or `auto` to select weighting from each header. Input files can be plain,
+gzip, xz, or Zstandard. Relative paths start from the dataset list's directory.
 
-#### Open your own results
+### 2. Build a gene index
+
+Use a GTF annotation and its matching genome FASTA:
 
 ```bash
-# Package a completed compact result directory, including its global sum.
-expresso pack --input results --output abundance.eai
-
-# Open the printed localhost URL, then choose abundance.eai in the browser.
-expresso view
-
-# The same portable file supports CLI extraction.
-expresso export --input abundance.eai --output selected-csv \
-  --target-list selected-exons.txt --dataset sample_A --compression none
+expresso build --level gene \
+  --gtf annotation.gtf.gz --genome genome.fa.gz \
+  --index gene-index --k 31 --threads 16
 ```
 
-`quantify` and `run` can also generate `results/abundance.eai` automatically
-with `--viewer-index` (compact output only). This keeps the standard result files
-and adds a portable copy.
+For an **exon index**, use `--level exon` and a different index directory.
+For an existing exon FASTA, replace `--gtf` and `--genome` with `--exons exons.fa`.
 
-Use a compact result directory as input to `pack`, or an `.eai` file in the
-browser's **Choose index** dialog. The SSHash construction index, input FASTA,
-individual `.eab` vectors, and result directories are not directly loadable in
-the viewer. Existing exact CSV results cannot be packed; produce compact output
-when quantifying if you want a portable viewer index.
-
-`pack` accepts compact results with any supported compression, including older
-EAB v1 exon results. It validates every vector and writes a new `.eai` file,
-using one independent zstd frame per vector. Encoded values are preserved
-without a second quantization. Global and optional statistic vectors are
-included. Packing reads the entire result set and requires disk space for the
-new file; original results remain reusable.
-
-The viewer is bundled into the Rust executable; Node, npm, a separate web
-server, and a WASM toolchain are unnecessary to use it. `view --port 9000`
-chooses another localhost port. It serves only the application assets. Selecting
-an index does **not** upload it. Target/dataset searches, pasted name or `#ID`
-lists, count bounds, logarithmic or linear coloring, and CSV download all run
-locally. The global sum and stored statistics are selectable alongside datasets.
-
-Cell values can display decoded integer counts or `log10(count + 1)`, independently
-of the color scale. Choose full integers, compact `K/M/G/T` suffixes (powers of
-1,000), or scientific notation with three significant digits. Log values use
-three significant digits. Hover or focus a cell to see its full decoded count.
-CSV exports retain decoded integer counts regardless of display formatting.
-
-**Hide all-zero rows** checks every selected dataset, including datasets on other
-pages. Sort targets and datasets by original order, name, total abundance,
-maximum abundance, or number of nonzero counts. Name sorting reads metadata only;
-zero-row hiding and abundance sorting scan the selected counts once, on request,
-in chunks of at most 4,096 targets. The viewer retains per-target/per-dataset
-summaries and one packed dataset vector, without retaining the full matrix.
-Summaries are reused until the target/dataset selection changes. Totals and
-comparisons preserve integer precision above `u64::MAX`. Sorting uses counts
-across the full selection, before min/max filtering; ties preserve original IDs.
-Choose the options, then click **Visualize selection** or **Apply view options**. **Cancel operation**
-stops loading/scanning/exporting between chunks. CSVs follow the applied order
-and exclude rows hidden by the all-zero filter.
-
-Opening a file reads the catalogue (target names, metadata, and vector offsets),
-**not the abundance blocks**. Counts are read only after a visualization or
-export request. Selections have no 200 × 100 size cap: select all matching
-names, paste lists, or select individual targets/datasets.
-
-The heatmap displays pages of 100 targets × 25 datasets. Use the navigation
-buttons or jump directly to target/dataset positions in your selection. Normal
-paging reads only the visible datasets and returns only visible target counts.
-Requested zero-row hiding and abundance sorting additionally stream the selected
-counts into summaries; the selected matrix is never retained in RAM. Colors scale to
-the current page, so compare cells on that page using its legend.
-
-With EAI v1, each dataset is one zstd frame. Reading any target from it requires
-decompressing that dataset block; the viewer cannot seek directly to a target
-inside the compressed frame. Rust/WebAssembly validates the EAB reference,
-checksum, padding, and codes and keeps **one bit-packed vector** cached, rather
-than a full array of decoded counts. Changing dataset evicts that cache. At 8
-bits, its abundance payload is approximately one byte per reference target.
-Only requested counts cross back to the page, as decimal strings; JavaScript
-`BigInt` preserves the entire 64-bit integer range. No other abundance vectors
-are read until requested. WebAssembly retains its peak linear-memory capacity
-for reuse even after allocations are freed.
-
-**Visible CSV** exports the displayed target-by-dataset matrix, with blank
-fields for out-of-range cells. **Full selection CSV** streams the entire
-selection in long format (`target_id,target_name,dataset,abundance`, using exon
-or gene column names). It applies inclusive bounds and omits nonmatching rows.
-Export processes one dataset at a time, extracts up to 512 requested counts per
-chunk, and writes to local browser temporary storage; it does not accumulate the
-CSV or selected matrix in RAM. Download the finished file, then use **Clear
-temporary CSV** to remove that local copy. Temporary export storage is subject
-to the browser's disk quota. CLI exports remain one CSV per dataset.
-
-Memory therefore depends on the catalogue, selected ID lists, one dataset's compressed/bit-packed
-vector and decompressor, optional row/column summaries, and the current page/scan/export chunk, rather than the
-whole abundance file or selected matrix. The catalogue must still fit in memory
-and EAI v1 limits it to 256 MiB; this is a metadata limit, not an abundance-file
-size limit. Open through `expresso view`, rather than `file://`, so WebAssembly,
-workers, local temporary storage, and checksums are available.
-
-If a file fails to open, confirm that it is a complete `.eai` produced by
-`pack` or `--viewer-index`. To diagnose it independently of the browser, try a
-CLI export into a new directory. If **Full selection CSV** reports that local
-storage is unavailable, use a browser with Origin Private File System support
-or CLI export; **Visible CSV** remains available. Large exports may require
-free local disk space and sufficient browser storage quota. Use the localhost
-URL printed by `view`, keep its process running, and refresh after rebuilding
-EXPRESSO to load the updated bundled application.
-
-The app's Rust source and a prebuilt WASM module are included. To rebuild it:
+### 3. Quantify your samples
 
 ```bash
-rustup target add wasm32-unknown-unknown
-env RUSTFLAGS= cargo build --manifest-path viewer/wasm/Cargo.toml \
-  --target wasm32-unknown-unknown --release --locked
-cp viewer/wasm/target/wasm32-unknown-unknown/release/expresso_viewer.wasm \
-  viewer/expresso_viewer.wasm
-cargo build --release --locked
+expresso quantify --index gene-index --fof datasets.tsv \
+  --output gene-results --threads 16 --jobs 4 --viewer-index
 ```
 
-Empty `RUSTFLAGS` overrides the native CPU setting for the WASM build. EAI v1
-starts with `EXPREAI1`, little-endian 64-bit catalogue offset and length, then
-independent zstd-compressed EAB blocks. A trailing JSON catalogue records target
-metadata, vector kind/name/offset/length, and coverage; a SHA-256 follows it.
-The same EAB validation code is compiled into the native tool and WASM decoder.
+Reuse `gene-index` for later sample collections. This example shares 16 workers
+across four concurrent datasets.
 
-### Failed datasets
+### 4. Open your results
 
-Normally, a dataset error stops the run. `--keep-going` records input/counting
-failures and continues with the rest. Failed datasets contribute **no partial
-counts** to the global sum. The final manifest lists their errors and records
-`coverage.complete: false`. CSV export preserves this information.
+In the viewer, choose **`gene-results/abundance.eai`**.
 
-Output/aggregation errors remain fatal. An all-failed run is not published.
-`--keep-going` cannot be combined with `--stats`. Invalid dataset lists and
-missing paths are rejected before processing. There is no automatic checkpoint
-resume; completed vectors are staged until the overall run is published.
-
-## Validation
+For results created without `--viewer-index`, package them for the viewer:
 
 ```bash
-cargo fmt --check
-cargo test --locked
-cargo clippy --all-targets --locked -- -D warnings
-env RUSTFLAGS= cargo test --manifest-path viewer/wasm/Cargo.toml --locked
+expresso pack --input gene-results --output gene-results/abundance.eai
 ```
 
-An optional Rust browser test checks a 300-target × 151-vector selection,
-on-demand reads, page navigation, full streamed CSV, and 64-bit values. With
-Firefox and geckodriver installed, start the driver in another terminal and run:
+### What gets written?
+
+```text
+gene-results/
+├── abundance.eai           # Open in the viewer (--viewer-index)
+├── datasets/               # One compact abundance vector per sample
+├── global.eab.zst          # Sum across samples
+├── genes.csv.zst           # Shared gene names and reference information
+└── manifest.json           # Sample names, outputs, and counting metrics
+```
+
+Default output uses **8 bits per abundance + Zstandard**.
+Choose `--bits 16` for more precision, or `--format csv` during quantification
+for exact CSV counts. [More input and output recipes →](docs/CLI.md)
+
+## Export results
+
+The commands below use the runnable `viewer-demo-results` example.
+Replace it with your own result directory or `.eai` file for other analyses.
+
+### Export all samples and the global sum
 
 ```bash
-geckodriver --host 127.0.0.1 --port 4444
-# In another terminal:
-cargo test --test viewer_browser --locked -- --ignored
+expresso export --input viewer-demo-results --output viewer-demo-csv \
+  --with-names --compression none
 ```
 
-Rust tests cover the EAB codecs and bit widths, integer boundaries, integrity
-checks, exon and gene ownership, weighted counting, filtered export, portable
-index round trips, global sums, and failures. Junction tests compare annotated
-transcripts and ordered merged-exon pairs against an independent k-mer oracle.
-The viewer example test regenerates the toy index from its FASTA inputs and
-checks both generated and bundled portable files against the documented counts.
-Integration tests use the bundled GGCAT library with an empty `PATH` and compare
-counts with an independent canonical-k-mer oracle. No separate tools or Python
-scripts are needed to run the tests.
+### Export selected genes from one sample
 
-## Upstream projects
+```bash
+expresso export --input viewer-demo-results --output selected-genes \
+  --dataset sample_A1 --target GENE_A --target GENE_B \
+  --with-names --compression none
+```
 
-- [GGCAT](https://github.com/algbio/ggcat) — simplitig construction.
-- [Rust SSHash](https://github.com/COMBINE-lab/sshash-rs) — compressed k-mer dictionary.
-- [Helicase](https://github.com/imartayan/helicase) — SIMD FASTA/FASTQ parsing.
-- [Logan](https://github.com/IndexThePlanet/Logan) — unitig datasets and abundance headers.
-- [REINDEER2](https://github.com/Yohan-HernandezCourbevoie/REINDEER2) — logarithmic abundance discretization inspiration.
+### Export normalized expression
 
-`Cargo.lock` pins dependency versions. GGCAT 2.1.0 is pinned to an upstream Git
-revision and compiled into EXPRESSO; SSHash 0.7.1 and Helicase 1.3.0 are also
-pinned explicitly in `Cargo.toml`. EXPRESSO handles xz through its shared liblzma
-dependency before passing the stream to Helicase; gzip/zstd use Helicase's input
-layer. EAB is EXPRESSO's own format and is not REINDEER2-compatible.
+```bash
+expresso export --input viewer-demo-results --output normalized-genes \
+  --dataset sample_A1 --normalization length-cpm \
+  --with-names --compression none
+```
+
+| Normalization | What it does |
+|---|---|
+| `none` | Raw k-mer abundance |
+| `cpm` | Divide by all input k-mer observations, then multiply by one million |
+| `coverage` | Divide by target length in k-mer positions |
+| `length-cpm` | Apply both dataset-size and target-length corrections |
+
+### Export the global sum or a count range
+
+```bash
+expresso export --input viewer-demo-results --output global-counts \
+  --global-only --with-names --compression none
+
+expresso export --input viewer-demo-results --output filtered-counts \
+  --dataset sample_B1 --min-value 100 --max-value 10000 \
+  --with-names --compression none
+```
+
+[Export lists of targets/samples, compression choices, and statistics →](docs/CLI.md#export-target-and-dataset-lists)
+
+## Advanced analyses
+
+### Include exon junctions in gene quantification
+
+Add junctions documented by the annotation:
+
+```bash
+expresso build --level gene \
+  --gtf annotation.gtf.gz --genome genome.fa.gz \
+  --junctions annotated --index annotated-gene-index --threads 16
+```
+
+Include all ordered exon pairs, in both directions, for genes with up to
+100 merged exons:
+
+```bash
+expresso build --level gene \
+  --gtf annotation.gtf.gz --genome genome.fa.gz \
+  --junctions all --junction-max-exons 100 \
+  --index all-junction-gene-index --threads 16
+```
+
+[Exon merging, threshold behavior, and junction definitions →](docs/IMPLEMENTATION.md#junction-construction)
+
+### Infer transcript expression with EM
+
+Try the included exon-skipping example:
+
+```bash
+expresso build --isoforms \
+  --gtf examples/isoforms/annotation.gtf --genome examples/isoforms/genome.fa \
+  --index isoform-demo-index --k 7 --threads 4 --memory-gb 1
+
+expresso quantify --index isoform-demo-index \
+  --fof examples/isoforms/datasets.tsv --output isoform-demo-features \
+  --mode unitigs --threads 4
+
+expresso infer-isoforms --index isoform-demo-index \
+  --input isoform-demo-features --output isoform-demo-results \
+  --threads 4 --compression none
+
+expresso pack --input isoform-demo-results \
+  --output isoform-demo-results/transcripts.eai
+```
+
+Expected EM abundances: **6 for `T_WITH_B`**, **4 for `T_SKIP_B`**.
+Open `transcripts.eai`, then choose **EM abundance** under **Transcript metric**.
+
+[Count-only input, output columns, and the EM model →](docs/ISOFORMS.md)
+
+## More help
+
+| Guide | Contents |
+|---|---|
+| [Viewer](docs/VIEWER.md) | Detailed walkthroughs for every tab, selection, plotting, normalization, and export |
+| [CLI recipes](docs/CLI.md) | Reads/unitigs, exon extraction, sample lists, statistics, CSV filters, and compression |
+| [Isoforms](docs/ISOFORMS.md) | Exon/intersection features, count-only fitting, EM results, and diagnostics |
+| [Implementation reference](docs/IMPLEMENTATION.md) | Counting rules, reference construction, normalization formulas, and file semantics |
+| [EAB format](docs/EAB_FORMAT.md) | Compact abundance encoding and binary layout |
+
+```bash
+expresso build --help
+expresso quantify --help
+expresso export --help
+expresso infer-isoforms --help
+```
+
+Built with [GGCAT simplitigs](https://github.com/algbio/ggcat),
+the [Rust SSHash dictionary](https://github.com/COMBINE-lab/sshash-rs), and
+[Helicase FASTA/FASTQ parsing](https://github.com/imartayan/helicase).
